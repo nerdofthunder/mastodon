@@ -7,13 +7,13 @@ module HomeHelper
     }
   end
 
-  def account_link_to(account, button = '')
-    content_tag(:div, class: 'account') do
+  def account_link_to(account, button = '', path: nil)
+    content_tag(:div, class: 'account account--minimal') do
       content_tag(:div, class: 'account__wrapper') do
         section = if account.nil?
                     content_tag(:div, class: 'account__display-name') do
                       content_tag(:div, class: 'account__avatar-wrapper') do
-                        content_tag(:div, '', class: 'account__avatar', style: "background-image: url(#{full_asset_url('avatars/original/missing.png', skip_pipeline: true)})")
+                        image_tag(full_asset_url('avatars/original/missing.png', skip_pipeline: true), class: 'account__avatar')
                       end +
                         content_tag(:span, class: 'display-name') do
                           content_tag(:strong, t('about.contact_missing')) +
@@ -21,9 +21,9 @@ module HomeHelper
                         end
                     end
                   else
-                    link_to(TagManager.instance.url_for(account), class: 'account__display-name') do
+                    link_to(path || ActivityPub::TagManager.instance.url_for(account), class: 'account__display-name') do
                       content_tag(:div, class: 'account__avatar-wrapper') do
-                        content_tag(:div, '', class: 'account__avatar', style: "background-image: url(#{account.avatar.url})")
+                        image_tag(full_asset_url(current_account&.user&.setting_auto_play_gif ? account.avatar_original_url : account.avatar_static_url), class: 'account__avatar', width: 46, height: 46)
                       end +
                         content_tag(:span, class: 'display-name') do
                           content_tag(:bdi) do
@@ -41,11 +41,29 @@ module HomeHelper
 
   def obscured_counter(count)
     if count <= 0
-      0
+      '0'
     elsif count == 1
-      1
+      '1'
     else
       '1+'
+    end
+  end
+
+  def custom_field_classes(field)
+    if field.verified?
+      'verified'
+    else
+      'emojify'
+    end
+  end
+
+  def sign_up_message
+    if closed_registrations?
+      t('auth.registration_closed', instance: site_hostname)
+    elsif open_registrations?
+      t('auth.register')
+    elsif approved_registrations?
+      t('auth.apply_for_account')
     end
   end
 end

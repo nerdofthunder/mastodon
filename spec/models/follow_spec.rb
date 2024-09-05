@@ -1,40 +1,41 @@
+# frozen_string_literal: true
+
 require 'rails_helper'
 
-RSpec.describe Follow, type: :model do
+RSpec.describe Follow do
   let(:alice) { Fabricate(:account, username: 'alice') }
   let(:bob)   { Fabricate(:account, username: 'bob') }
 
   describe 'validations' do
-    subject { Follow.new(account: alice, target_account: bob) }
+    subject { described_class.new(account: alice, target_account: bob, rate_limit: true) }
 
-    it 'has a valid fabricator' do
-      follow = Fabricate.build(:follow)
-      expect(follow).to be_valid
+    it { is_expected.to belong_to(:account).required }
+    it { is_expected.to belong_to(:target_account).required }
+
+    it 'is invalid if account already follows too many people' do
+      alice.update(following_count: FollowLimitValidator::LIMIT)
+
+      expect(subject).to_not be_valid
+      expect(subject).to model_have_error_on_field(:base)
     end
 
-    it 'is invalid without an account' do
-      follow = Fabricate.build(:follow, account: nil)
-      follow.valid?
-      expect(follow).to model_have_error_on_field(:account)
-    end
+    it 'is valid if account is only on the brink of following too many people' do
+      alice.update(following_count: FollowLimitValidator::LIMIT - 1)
 
-    it 'is invalid without a target_account' do
-      follow = Fabricate.build(:follow, target_account: nil)
-      follow.valid?
-      expect(follow).to model_have_error_on_field(:target_account)
+      expect(subject).to be_valid
+      expect(subject).to_not model_have_error_on_field(:base)
     end
   end
 
-  describe 'recent' do
-    it 'sorts so that more recent follows comes earlier' do
-      follow0 = Follow.create!(account: alice, target_account: bob)
-      follow1 = Follow.create!(account: bob, target_account: alice)
+  describe '.recent' do
+    let!(:follow_earlier) { Fabricate(:follow) }
+    let!(:follow_later) { Fabricate(:follow) }
 
-      a = Follow.recent.to_a
+    it 'sorts with most recent follows first' do
+      results = described_class.recent
 
-      expect(a.size).to eq 2
-      expect(a[0]).to eq follow1
-      expect(a[1]).to eq follow0
+      expect(results.size).to eq 2
+      expect(results).to eq [follow_later, follow_earlier]
     end
   end
 

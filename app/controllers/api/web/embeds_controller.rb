@@ -1,20 +1,36 @@
 # frozen_string_literal: true
 
 class Api::Web::EmbedsController < Api::Web::BaseController
-  respond_to :json
+  include Authorization
 
-  before_action :require_user!
+  before_action :set_status
 
-  def create
-    status = StatusFinder.new(params[:url]).status
-    render json: status, serializer: OEmbedSerializer, width: 400
-  rescue ActiveRecord::RecordNotFound
-    oembed = FetchOEmbedService.new.call(params[:url])
+  def show
+    return not_found if @status.hidden?
 
-    if oembed
-      render json: oembed
+    if @status.local?
+      render json: @status, serializer: OEmbedSerializer, width: 400
     else
-      render json: {}, status: :not_found
+      return not_found unless user_signed_in?
+
+      url = ActivityPub::TagManager.instance.url_for(@status)
+      oembed = FetchOEmbedService.new.call(url)
+      return not_found if oembed.nil?
+
+      begin
+        oembed[:html] = Sanitize.fragment(oembed[:html], Sanitize::Config::MASTODON_OEMBED)
+      rescue ArgumentError
+        return not_found
+      end
+
+      render json: oembed
     end
+  end
+
+  def set_status
+    @status = Status.find(params[:id])
+    authorize @status, :show?
+  rescue Mastodon::NotPermittedError
+    not_found
   end
 end

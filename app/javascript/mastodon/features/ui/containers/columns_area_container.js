@@ -1,4 +1,5 @@
 import { connect } from 'react-redux';
+
 import ColumnsArea from '../components/columns_area';
 
 const mapStateToProps = state => ({
@@ -6,4 +7,4 @@ const mapStateToProps = state => ({
   isModalOpen: !!state.get('modal').modalType,
 });
 
-export default connect(mapStateToProps, null, null, { withRef: true })(ColumnsArea);
+export default connect(mapStateToProps, null, null, { forwardRef: true })(ColumnsArea);

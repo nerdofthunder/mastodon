@@ -10,7 +10,9 @@ class BackupWorker
 
     ActiveRecord::Base.connection_pool.with_connection do
       backup = Backup.find(backup_id)
-      backup&.destroy
+      backup.destroy
+    rescue ActiveRecord::RecordNotFound
+      true
     end
   end
 

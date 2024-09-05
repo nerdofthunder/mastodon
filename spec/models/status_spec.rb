@@ -1,11 +1,13 @@
+# frozen_string_literal: true
+
 require 'rails_helper'
 
-RSpec.describe Status, type: :model do
+RSpec.describe Status do
+  subject { Fabricate(:status, account: alice) }
+
   let(:alice) { Fabricate(:account, username: 'alice') }
   let(:bob)   { Fabricate(:account, username: 'bob') }
   let(:other) { Fabricate(:status, account: bob, text: 'Skulls for the skull god! The enemy\'s gates are sideways!') }
-
-  subject { Fabricate(:status, account: alice) }
 
   describe '#local?' do
     it 'returns true when no remote URI is set' do
@@ -47,22 +49,22 @@ RSpec.describe Status, type: :model do
   end
 
   describe '#verb' do
-    context 'if destroyed?' do
+    context 'when destroyed?' do
       it 'returns :delete' do
         subject.destroy!
         expect(subject.verb).to be :delete
       end
     end
 
-    context 'unless destroyed?' do
-      context 'if reblog?' do
+    context 'when not destroyed?' do
+      context 'when reblog?' do
         it 'returns :share' do
           subject.reblog = other
           expect(subject.verb).to be :share
         end
       end
 
-      context 'unless reblog?' do
+      context 'when not reblog?' do
         it 'returns :post' do
           subject.reblog = nil
           expect(subject.verb).to be :post
@@ -82,58 +84,29 @@ RSpec.describe Status, type: :model do
     end
   end
 
-  describe '#title' do
-    # rubocop:disable Style/InterpolationCheck
-
-    let(:account) { subject.account }
-
-    context 'if destroyed?' do
-      it 'returns "#{account.acct} deleted status"' do
-        subject.destroy!
-        expect(subject.title).to eq "#{account.acct} deleted status"
-      end
-    end
-
-    context 'unless destroyed?' do
-      context 'if reblog?' do
-        it 'returns "#{account.acct} shared a status by #{reblog.account.acct}"' do
-          reblog = subject.reblog = other
-          expect(subject.title).to eq "#{account.acct} shared a status by #{reblog.account.acct}"
-        end
-      end
-
-      context 'unless reblog?' do
-        it 'returns "New status by #{account.acct}"' do
-          subject.reblog = nil
-          expect(subject.title).to eq "New status by #{account.acct}"
-        end
-      end
-    end
-  end
-
   describe '#hidden?' do
-    context 'if private_visibility?' do
+    context 'when private_visibility?' do
       it 'returns true' do
         subject.visibility = :private
         expect(subject.hidden?).to be true
       end
     end
 
-    context 'if direct_visibility?' do
+    context 'when direct_visibility?' do
       it 'returns true' do
         subject.visibility = :direct
         expect(subject.hidden?).to be true
       end
     end
 
-    context 'if public_visibility?' do
+    context 'when public_visibility?' do
       it 'returns false' do
         subject.visibility = :public
         expect(subject.hidden?).to be false
       end
     end
 
-    context 'if unlisted_visibility?' do
+    context 'when unlisted_visibility?' do
       it 'returns false' do
         subject.visibility = :unlisted
         expect(subject.hidden?).to be false
@@ -154,7 +127,7 @@ RSpec.describe Status, type: :model do
 
   describe '#target' do
     it 'returns nil if the status is self-contained' do
-     expect(subject.target).to be_nil
+      expect(subject.target).to be_nil
     end
 
     it 'returns nil if the status is a reply' do
@@ -187,13 +160,13 @@ RSpec.describe Status, type: :model do
       reblog = Fabricate(:status, account: bob, reblog: subject)
       expect(subject.reblogs_count).to eq 1
       expect { subject.destroy }.to_not raise_error
-      expect(Status.find_by(id: reblog.id)).to be_nil
+      expect(described_class.find_by(id: reblog.id)).to be_nil
     end
   end
 
   describe '#replies_count' do
     it 'is the number of replies' do
-      reply = Fabricate(:status, account: bob, thread: subject)
+      Fabricate(:status, account: bob, thread: subject)
       expect(subject.replies_count).to eq 1
     end
 
@@ -232,11 +205,88 @@ RSpec.describe Status, type: :model do
     end
   end
 
+  describe '#reported?' do
+    context 'when the status is not reported' do
+      it 'returns false' do
+        expect(subject.reported?).to be false
+      end
+    end
+
+    context 'when the status is part of an open report' do
+      before do
+        Fabricate(:report, target_account: subject.account, status_ids: [subject.id])
+      end
+
+      it 'returns true' do
+        expect(subject.reported?).to be true
+      end
+    end
+
+    context 'when the status is part of a closed report with an account warning mentioning the account' do
+      before do
+        report = Fabricate(:report, target_account: subject.account, status_ids: [subject.id])
+        report.resolve!(Fabricate(:account))
+        Fabricate(:account_warning, target_account: subject.account, status_ids: [subject.id], report: report)
+      end
+
+      it 'returns true' do
+        expect(subject.reported?).to be true
+      end
+    end
+
+    context 'when the status is part of a closed report with an account warning not mentioning the account' do
+      before do
+        report = Fabricate(:report, target_account: subject.account, status_ids: [subject.id])
+        report.resolve!(Fabricate(:account))
+        Fabricate(:account_warning, target_account: subject.account, report: report)
+      end
+
+      it 'returns false' do
+        expect(subject.reported?).to be false
+      end
+    end
+  end
+
+  describe '#ordered_media_attachments' do
+    let(:status) { Fabricate(:status) }
+
+    let(:first_attachment) { Fabricate(:media_attachment) }
+    let(:second_attachment) { Fabricate(:media_attachment) }
+    let(:last_attachment) { Fabricate(:media_attachment) }
+    let(:extra_attachment) { Fabricate(:media_attachment) }
+
+    before do
+      stub_const('Status::MEDIA_ATTACHMENTS_LIMIT', 3)
+
+      # Add attachments out of order
+      status.media_attachments << second_attachment
+      status.media_attachments << last_attachment
+      status.media_attachments << extra_attachment
+      status.media_attachments << first_attachment
+    end
+
+    context 'when ordered_media_attachment_ids is not set' do
+      it 'returns up to MEDIA_ATTACHMENTS_LIMIT attachments' do
+        expect(status.ordered_media_attachments.size).to eq Status::MEDIA_ATTACHMENTS_LIMIT
+      end
+    end
+
+    context 'when ordered_media_attachment_ids is set' do
+      before do
+        status.update!(ordered_media_attachment_ids: [first_attachment.id, second_attachment.id, last_attachment.id, extra_attachment.id])
+      end
+
+      it 'returns up to MEDIA_ATTACHMENTS_LIMIT attachments in the expected order' do
+        expect(status.ordered_media_attachments).to eq [first_attachment, second_attachment, last_attachment]
+      end
+    end
+  end
+
   describe '.mutes_map' do
+    subject { described_class.mutes_map([status.conversation.id], account) }
+
     let(:status)  { Fabricate(:status) }
     let(:account) { Fabricate(:account) }
-
-    subject { Status.mutes_map([status.conversation.id], account) }
 
     it 'returns a hash' do
       expect(subject).to be_a Hash
@@ -249,10 +299,10 @@ RSpec.describe Status, type: :model do
   end
 
   describe '.favourites_map' do
+    subject { described_class.favourites_map([status], account) }
+
     let(:status)  { Fabricate(:status) }
     let(:account) { Fabricate(:account) }
-
-    subject { Status.favourites_map([status], account) }
 
     it 'returns a hash' do
       expect(subject).to be_a Hash
@@ -265,10 +315,10 @@ RSpec.describe Status, type: :model do
   end
 
   describe '.reblogs_map' do
+    subject { described_class.reblogs_map([status], account) }
+
     let(:status)  { Fabricate(:status) }
     let(:account) { Fabricate(:account) }
-
-    subject { Status.reblogs_map([status], account) }
 
     it 'returns a hash' do
       expect(subject).to be_a Hash
@@ -280,373 +330,117 @@ RSpec.describe Status, type: :model do
     end
   end
 
-  describe '.in_chosen_languages' do
-    context 'for accounts with language filters' do
-      let(:user) { Fabricate(:user, chosen_languages: ['en']) }
+  describe '.tagged_with' do
+    let(:tag_cats) { Fabricate(:tag, name: 'cats') }
+    let(:tag_dogs) { Fabricate(:tag, name: 'dogs') }
+    let(:tag_zebras) { Fabricate(:tag, name: 'zebras') }
+    let!(:status_with_tag_cats) { Fabricate(:status, tags: [tag_cats]) }
+    let!(:status_with_tag_dogs) { Fabricate(:status, tags: [tag_dogs]) }
+    let!(:status_tagged_with_zebras) { Fabricate(:status, tags: [tag_zebras]) }
+    let!(:status_without_tags) { Fabricate(:status, tags: []) }
+    let!(:status_with_all_tags) { Fabricate(:status, tags: [tag_cats, tag_dogs, tag_zebras]) }
 
-      it 'does not include statuses in not in chosen languages' do
-        status = Fabricate(:status, language: 'de')
-        expect(Status.in_chosen_languages(user.account)).not_to include status
-      end
-
-      it 'includes status with unknown language' do
-        status = Fabricate(:status, language: nil)
-        expect(Status.in_chosen_languages(user.account)).to include status
-      end
-    end
-  end
-
-  describe '.as_home_timeline' do
-    let(:account) { Fabricate(:account) }
-    let(:followed) { Fabricate(:account) }
-    let(:not_followed) { Fabricate(:account) }
-
-    before do
-      Fabricate(:follow, account: account, target_account: followed)
-
-      @self_status = Fabricate(:status, account: account, visibility: :public)
-      @self_direct_status = Fabricate(:status, account: account, visibility: :direct)
-      @followed_status = Fabricate(:status, account: followed, visibility: :public)
-      @followed_direct_status = Fabricate(:status, account: followed, visibility: :direct)
-      @not_followed_status = Fabricate(:status, account: not_followed, visibility: :public)
-
-      @results = Status.as_home_timeline(account)
-    end
-
-    it 'includes statuses from self' do
-      expect(@results).to include(@self_status)
-    end
-
-    it 'does not include direct statuses from self' do
-      expect(@results).to_not include(@self_direct_status)
-    end
-
-    it 'includes statuses from followed' do
-      expect(@results).to include(@followed_status)
-    end
-
-    it 'does not include direct statuses mentioning recipient from followed' do
-      Fabricate(:mention, account: account, status: @followed_direct_status)
-      expect(@results).to_not include(@followed_direct_status)
-    end
-
-    it 'does not include direct statuses not mentioning recipient from followed' do
-      expect(@results).not_to include(@followed_direct_status)
-    end
-
-    it 'does not include statuses from non-followed' do
-      expect(@results).not_to include(@not_followed_status)
-    end
-  end
-
-  describe '.as_direct_timeline' do
-    let(:account) { Fabricate(:account) }
-    let(:followed) { Fabricate(:account) }
-    let(:not_followed) { Fabricate(:account) }
-
-    before do
-      Fabricate(:follow, account: account, target_account: followed)
-
-      @self_public_status = Fabricate(:status, account: account, visibility: :public)
-      @self_direct_status = Fabricate(:status, account: account, visibility: :direct)
-      @followed_public_status = Fabricate(:status, account: followed, visibility: :public)
-      @followed_direct_status = Fabricate(:status, account: followed, visibility: :direct)
-      @not_followed_direct_status = Fabricate(:status, account: not_followed, visibility: :direct)
-
-      @results = Status.as_direct_timeline(account)
-    end
-
-    it 'does not include public statuses from self' do
-      expect(@results).to_not include(@self_public_status)
-    end
-
-    it 'includes direct statuses from self' do
-      expect(@results).to include(@self_direct_status)
-    end
-
-    it 'does not include public statuses from followed' do
-      expect(@results).to_not include(@followed_public_status)
-    end
-
-    it 'does not include direct statuses not mentioning recipient from followed' do
-      expect(@results).to_not include(@followed_direct_status)
-    end
-
-    it 'does not include direct statuses not mentioning recipient from non-followed' do
-      expect(@results).to_not include(@not_followed_direct_status)
-    end
-
-    it 'includes direct statuses mentioning recipient from followed' do
-      Fabricate(:mention, account: account, status: @followed_direct_status)
-      results2 = Status.as_direct_timeline(account)
-      expect(results2).to include(@followed_direct_status)
-    end
-
-    it 'includes direct statuses mentioning recipient from non-followed' do
-      Fabricate(:mention, account: account, status: @not_followed_direct_status)
-      results2 = Status.as_direct_timeline(account)
-      expect(results2).to include(@not_followed_direct_status)
-    end
-  end
-
-  describe '.as_public_timeline' do
-    it 'only includes statuses with public visibility' do
-      public_status = Fabricate(:status, visibility: :public)
-      private_status = Fabricate(:status, visibility: :private)
-
-      results = Status.as_public_timeline
-      expect(results).to include(public_status)
-      expect(results).not_to include(private_status)
-    end
-
-    it 'does not include replies' do
-      status = Fabricate(:status)
-      reply = Fabricate(:status, in_reply_to_id: status.id)
-
-      results = Status.as_public_timeline
-      expect(results).to include(status)
-      expect(results).not_to include(reply)
-    end
-
-    it 'does not include boosts' do
-      status = Fabricate(:status)
-      boost = Fabricate(:status, reblog_of_id: status.id)
-
-      results = Status.as_public_timeline
-      expect(results).to include(status)
-      expect(results).not_to include(boost)
-    end
-
-    it 'filters out silenced accounts' do
-      account = Fabricate(:account)
-      silenced_account = Fabricate(:account, silenced: true)
-      status = Fabricate(:status, account: account)
-      silenced_status = Fabricate(:status, account: silenced_account)
-
-      results = Status.as_public_timeline
-      expect(results).to include(status)
-      expect(results).not_to include(silenced_status)
-    end
-
-    context 'without local_only option' do
-      let(:viewer) { nil }
-
-      let!(:local_account)  { Fabricate(:account, domain: nil) }
-      let!(:remote_account) { Fabricate(:account, domain: 'test.com') }
-      let!(:local_status)   { Fabricate(:status, account: local_account) }
-      let!(:remote_status)  { Fabricate(:status, account: remote_account) }
-
-      subject { Status.as_public_timeline(viewer, false) }
-
-      context 'without a viewer' do
-        let(:viewer) { nil }
-
-        it 'includes remote instances statuses' do
-          expect(subject).to include(remote_status)
-        end
-
-        it 'includes local statuses' do
-          expect(subject).to include(local_status)
-        end
-      end
-
-      context 'with a viewer' do
-        let(:viewer) { Fabricate(:account, username: 'viewer') }
-
-        it 'includes remote instances statuses' do
-          expect(subject).to include(remote_status)
-        end
-
-        it 'includes local statuses' do
-          expect(subject).to include(local_status)
-        end
+    context 'when given one tag' do
+      it 'returns the expected statuses' do
+        expect(described_class.tagged_with([tag_cats.id]))
+          .to include(status_with_tag_cats, status_with_all_tags)
+          .and not_include(status_without_tags)
+        expect(described_class.tagged_with([tag_dogs.id]))
+          .to include(status_with_tag_dogs, status_with_all_tags)
+          .and not_include(status_without_tags)
+        expect(described_class.tagged_with([tag_zebras.id]))
+          .to include(status_tagged_with_zebras, status_with_all_tags)
+          .and not_include(status_without_tags)
       end
     end
 
-    context 'with a local_only option set' do
-      let!(:local_account)  { Fabricate(:account, domain: nil) }
-      let!(:remote_account) { Fabricate(:account, domain: 'test.com') }
-      let!(:local_status)   { Fabricate(:status, account: local_account) }
-      let!(:remote_status)  { Fabricate(:status, account: remote_account) }
-
-      subject { Status.as_public_timeline(viewer, true) }
-
-      context 'without a viewer' do
-        let(:viewer) { nil }
-
-        it 'does not include remote instances statuses' do
-          expect(subject).to include(local_status)
-          expect(subject).not_to include(remote_status)
-        end
-      end
-
-      context 'with a viewer' do
-        let(:viewer) { Fabricate(:account, username: 'viewer') }
-
-        it 'does not include remote instances statuses' do
-          expect(subject).to include(local_status)
-          expect(subject).not_to include(remote_status)
-        end
-
-        it 'is not affected by personal domain blocks' do
-          viewer.block_domain!('test.com')
-          expect(subject).to include(local_status)
-          expect(subject).not_to include(remote_status)
-        end
-      end
-    end
-
-    describe 'with an account passed in' do
-      before do
-        @account = Fabricate(:account)
-      end
-
-      it 'excludes statuses from accounts blocked by the account' do
-        blocked = Fabricate(:account)
-        Fabricate(:block, account: @account, target_account: blocked)
-        blocked_status = Fabricate(:status, account: blocked)
-
-        results = Status.as_public_timeline(@account)
-        expect(results).not_to include(blocked_status)
-      end
-
-      it 'excludes statuses from accounts who have blocked the account' do
-        blocked = Fabricate(:account)
-        Fabricate(:block, account: blocked, target_account: @account)
-        blocked_status = Fabricate(:status, account: blocked)
-
-        results = Status.as_public_timeline(@account)
-        expect(results).not_to include(blocked_status)
-      end
-
-      it 'excludes statuses from accounts muted by the account' do
-        muted = Fabricate(:account)
-        Fabricate(:mute, account: @account, target_account: muted)
-        muted_status = Fabricate(:status, account: muted)
-
-        results = Status.as_public_timeline(@account)
-        expect(results).not_to include(muted_status)
-      end
-
-      it 'excludes statuses from accounts from personally blocked domains' do
-        blocked = Fabricate(:account, domain: 'example.com')
-        @account.block_domain!(blocked.domain)
-        blocked_status = Fabricate(:status, account: blocked)
-
-        results = Status.as_public_timeline(@account)
-        expect(results).not_to include(blocked_status)
-      end
-
-      context 'with language preferences' do
-        it 'excludes statuses in languages not allowed by the account user' do
-          user = Fabricate(:user, chosen_languages: [:en, :es])
-          @account.update(user: user)
-          en_status = Fabricate(:status, language: 'en')
-          es_status = Fabricate(:status, language: 'es')
-          fr_status = Fabricate(:status, language: 'fr')
-
-          results = Status.as_public_timeline(@account)
-          expect(results).to include(en_status)
-          expect(results).to include(es_status)
-          expect(results).not_to include(fr_status)
-        end
-
-        it 'includes all languages when user does not have a setting' do
-          user = Fabricate(:user, chosen_languages: nil)
-          @account.update(user: user)
-
-          en_status = Fabricate(:status, language: 'en')
-          es_status = Fabricate(:status, language: 'es')
-
-          results = Status.as_public_timeline(@account)
-          expect(results).to include(en_status)
-          expect(results).to include(es_status)
-        end
-
-        it 'includes all languages when account does not have a user' do
-          expect(@account.user).to be_nil
-          en_status = Fabricate(:status, language: 'en')
-          es_status = Fabricate(:status, language: 'es')
-
-          results = Status.as_public_timeline(@account)
-          expect(results).to include(en_status)
-          expect(results).to include(es_status)
-        end
+    context 'when given multiple tags' do
+      it 'returns the expected statuses' do
+        expect(described_class.tagged_with([tag_cats.id, tag_dogs.id]))
+          .to include(status_with_tag_cats, status_with_tag_dogs, status_with_all_tags)
+          .and not_include(status_without_tags)
+        expect(described_class.tagged_with([tag_cats.id, tag_zebras.id]))
+          .to include(status_with_tag_cats, status_tagged_with_zebras, status_with_all_tags)
+          .and not_include(status_without_tags)
+        expect(described_class.tagged_with([tag_dogs.id, tag_zebras.id]))
+          .to include(status_with_tag_dogs, status_tagged_with_zebras, status_with_all_tags)
+          .and not_include(status_without_tags)
       end
     end
   end
 
-  describe '.as_tag_timeline' do
-    it 'includes statuses with a tag' do
-      tag = Fabricate(:tag)
-      status = Fabricate(:status, tags: [tag])
-      other = Fabricate(:status)
+  describe '.tagged_with_all' do
+    let(:tag_cats) { Fabricate(:tag, name: 'cats') }
+    let(:tag_dogs) { Fabricate(:tag, name: 'dogs') }
+    let(:tag_zebras) { Fabricate(:tag, name: 'zebras') }
+    let!(:status_with_tag_cats) { Fabricate(:status, tags: [tag_cats]) }
+    let!(:status_with_tag_dogs) { Fabricate(:status, tags: [tag_dogs]) }
+    let!(:status_tagged_with_zebras) { Fabricate(:status, tags: [tag_zebras]) }
+    let!(:status_without_tags) { Fabricate(:status, tags: []) }
+    let!(:status_with_all_tags) { Fabricate(:status, tags: [tag_cats, tag_dogs]) }
 
-      results = Status.as_tag_timeline(tag)
-      expect(results).to include(status)
-      expect(results).not_to include(other)
+    context 'when given one tag' do
+      it 'returns the expected statuses' do
+        expect(described_class.tagged_with_all([tag_cats.id]))
+          .to include(status_with_tag_cats, status_with_all_tags)
+          .and not_include(status_without_tags)
+        expect(described_class.tagged_with_all([tag_dogs.id]))
+          .to include(status_with_tag_dogs, status_with_all_tags)
+          .and not_include(status_without_tags)
+        expect(described_class.tagged_with_all([tag_zebras.id]))
+          .to include(status_tagged_with_zebras)
+          .and not_include(status_without_tags)
+      end
     end
 
-    it 'allows replies to be included' do
-      original = Fabricate(:status)
-      tag = Fabricate(:tag)
-      status = Fabricate(:status, tags: [tag], in_reply_to_id: original.id)
-
-      results = Status.as_tag_timeline(tag)
-      expect(results).to include(status)
+    context 'when given multiple tags' do
+      it 'returns the expected statuses' do
+        expect(described_class.tagged_with_all([tag_cats.id, tag_dogs.id]))
+          .to include(status_with_all_tags)
+        expect(described_class.tagged_with_all([tag_cats.id, tag_zebras.id]))
+          .to eq []
+        expect(described_class.tagged_with_all([tag_dogs.id, tag_zebras.id]))
+          .to eq []
+      end
     end
   end
 
-  describe '.permitted_for' do
-    subject { described_class.permitted_for(target_account, account).pluck(:visibility) }
+  describe '.tagged_with_none' do
+    let(:tag_cats) { Fabricate(:tag, name: 'cats') }
+    let(:tag_dogs) { Fabricate(:tag, name: 'dogs') }
+    let(:tag_zebras) { Fabricate(:tag, name: 'zebras') }
+    let!(:status_with_tag_cats) { Fabricate(:status, tags: [tag_cats]) }
+    let!(:status_with_tag_dogs) { Fabricate(:status, tags: [tag_dogs]) }
+    let!(:status_tagged_with_zebras) { Fabricate(:status, tags: [tag_zebras]) }
+    let!(:status_without_tags) { Fabricate(:status, tags: []) }
+    let!(:status_with_all_tags) { Fabricate(:status, tags: [tag_cats, tag_dogs, tag_zebras]) }
 
-    let(:target_account) { alice }
-    let(:account) { bob }
-    let!(:public_status) { Fabricate(:status, account: target_account, visibility: 'public') }
-    let!(:unlisted_status) { Fabricate(:status, account: target_account, visibility: 'unlisted') }
-    let!(:private_status) { Fabricate(:status, account: target_account, visibility: 'private') }
-
-    let!(:direct_status) do
-      Fabricate(:status, account: target_account, visibility: 'direct').tap do |status|
-        Fabricate(:mention, status: status, account: account)
+    context 'when given one tag' do
+      it 'returns the expected statuses' do
+        expect(described_class.tagged_with_none([tag_cats.id]))
+          .to include(status_with_tag_dogs, status_tagged_with_zebras, status_without_tags)
+          .and not_include(status_with_all_tags)
+        expect(described_class.tagged_with_none([tag_dogs.id]))
+          .to include(status_with_tag_cats, status_tagged_with_zebras, status_without_tags)
+          .and not_include(status_with_all_tags)
+        expect(described_class.tagged_with_none([tag_zebras.id]))
+          .to include(status_with_tag_cats, status_with_tag_dogs, status_without_tags)
+          .and not_include(status_with_all_tags)
       end
     end
 
-    let!(:other_direct_status) do
-      Fabricate(:status, account: target_account, visibility: 'direct').tap do |status|
-        Fabricate(:mention, status: status)
+    context 'when given multiple tags' do
+      it 'returns the expected statuses' do
+        expect(described_class.tagged_with_none([tag_cats.id, tag_dogs.id]))
+          .to include(status_tagged_with_zebras, status_without_tags)
+          .and not_include(status_with_all_tags)
+        expect(described_class.tagged_with_none([tag_cats.id, tag_zebras.id]))
+          .to include(status_with_tag_dogs, status_without_tags)
+          .and not_include(status_with_all_tags)
+        expect(described_class.tagged_with_none([tag_dogs.id, tag_zebras.id]))
+          .to include(status_with_tag_cats, status_without_tags)
+          .and not_include(status_with_all_tags)
       end
-    end
-
-    context 'given nil' do
-      let(:account) { nil }
-      let(:direct_status) { nil }
-      it { is_expected.to eq(%w(unlisted public)) }
-    end
-
-    context 'given blocked account' do
-      before do
-        target_account.block!(account)
-      end
-
-      it { is_expected.to be_empty }
-    end
-
-    context 'given same account' do
-      let(:account) { target_account }
-      it { is_expected.to eq(%w(direct direct private unlisted public)) }
-    end
-
-    context 'given followed account' do
-      before do
-        account.follow!(target_account)
-      end
-
-      it { is_expected.to eq(%w(direct private unlisted public)) }
-    end
-
-    context 'given unfollowed account' do
-      it { is_expected.to eq(%w(direct unlisted public)) }
     end
   end
 
@@ -660,21 +454,21 @@ RSpec.describe Status, type: :model do
     end
 
     it 'creates new conversation for stand-alone status' do
-      expect(Status.create(account: alice, text: 'First').conversation_id).to_not be_nil
+      expect(described_class.create(account: alice, text: 'First').conversation_id).to_not be_nil
     end
 
     it 'keeps conversation of parent node' do
       parent = Fabricate(:status, text: 'First')
-      expect(Status.create(account: alice, thread: parent, text: 'Response').conversation_id).to eq parent.conversation_id
+      expect(described_class.create(account: alice, thread: parent, text: 'Response').conversation_id).to eq parent.conversation_id
     end
 
     it 'sets `local` to true for status by local account' do
-      expect(Status.create(account: alice, text: 'foo').local).to be true
+      expect(described_class.create(account: alice, text: 'foo').local).to be true
     end
 
     it 'sets `local` to false for status by remote account' do
       alice.update(domain: 'example.com')
-      expect(Status.create(account: alice, text: 'foo').local).to be false
+      expect(described_class.create(account: alice, text: 'foo').local).to be false
     end
   end
 
@@ -688,7 +482,7 @@ RSpec.describe Status, type: :model do
 
   describe 'after_create' do
     it 'saves ActivityPub uri as uri for local status' do
-      status = Status.create(account: alice, text: 'foo')
+      status = described_class.create(account: alice, text: 'foo')
       status.reload
       expect(status.uri).to start_with('https://')
     end

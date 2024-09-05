@@ -1,9 +1,6 @@
 # frozen_string_literal: true
 
-class Settings::ApplicationsController < ApplicationController
-  layout 'admin'
-
-  before_action :authenticate_user!
+class Settings::ApplicationsController < Settings::BaseController
   before_action :set_application, only: [:show, :update, :destroy, :regenerate]
   before_action :prepare_scopes, only: [:create, :update]
 
@@ -11,14 +8,14 @@ class Settings::ApplicationsController < ApplicationController
     @applications = current_user.applications.order(id: :desc).page(params[:page])
   end
 
+  def show; end
+
   def new
     @application = Doorkeeper::Application.new(
       redirect_uri: Doorkeeper.configuration.native_redirect_uri,
-      scopes: 'read write follow'
+      scopes: 'profile'
     )
   end
-
-  def show; end
 
   def create
     @application = current_user.applications.build(application_params)
@@ -32,7 +29,13 @@ class Settings::ApplicationsController < ApplicationController
 
   def update
     if @application.update(application_params)
-      redirect_to settings_applications_path, notice: I18n.t('generic.changes_saved_msg')
+      if @application.scopes_previously_changed?
+        @access_token = current_user.token_for_app(@application)
+        @access_token.destroy
+        redirect_to settings_application_path(@application), notice: I18n.t('applications.token_regenerated')
+      else
+        redirect_to settings_application_path(@application), notice: I18n.t('generic.changes_saved_msg')
+      end
     else
       render :show
     end

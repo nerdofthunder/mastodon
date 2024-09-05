@@ -1,21 +1,25 @@
-import { connect } from 'react-redux';
-import StatusList from '../../../components/status_list';
-import { scrollTopTimeline } from '../../../actions/timelines';
+import { createSelector } from '@reduxjs/toolkit';
 import { Map as ImmutableMap, List as ImmutableList } from 'immutable';
-import { createSelector } from 'reselect';
+import { connect } from 'react-redux';
+
 import { debounce } from 'lodash';
+
+import { scrollTopTimeline, loadPending } from '../../../actions/timelines';
+import StatusList from '../../../components/status_list';
 import { me } from '../../../initial_state';
 
-const makeGetStatusIds = () => createSelector([
+const makeGetStatusIds = (pending = false) => createSelector([
   (state, { type }) => state.getIn(['settings', type], ImmutableMap()),
-  (state, { type }) => state.getIn(['timelines', type, 'items'], ImmutableList()),
+  (state, { type }) => state.getIn(['timelines', type, pending ? 'pendingItems' : 'items'], ImmutableList()),
   (state)           => state.get('statuses'),
 ], (columnSettings, statusIds, statuses) => {
   return statusIds.filter(id => {
-    if (id === null) return true;
+    if (id === null || id === 'inline-follow-suggestions') return true;
 
     const statusForId = statuses.get(id);
     let showStatus    = true;
+
+    if (statusForId.get('account') === me) return true;
 
     if (columnSettings.getIn(['shows', 'reblog']) === false) {
       showStatus = showStatus && statusForId.get('reblog') === null;
@@ -31,12 +35,15 @@ const makeGetStatusIds = () => createSelector([
 
 const makeMapStateToProps = () => {
   const getStatusIds = makeGetStatusIds();
+  const getPendingStatusIds = makeGetStatusIds(true);
 
   const mapStateToProps = (state, { timelineId }) => ({
     statusIds: getStatusIds(state, { type: timelineId }),
+    lastId:    state.getIn(['timelines', timelineId, 'items'])?.last(),
     isLoading: state.getIn(['timelines', timelineId, 'isLoading'], true),
     isPartial: state.getIn(['timelines', timelineId, 'isPartial'], false),
     hasMore:   state.getIn(['timelines', timelineId, 'hasMore']),
+    numPending: getPendingStatusIds(state, { type: timelineId }).size,
   });
 
   return mapStateToProps;
@@ -51,6 +58,8 @@ const mapDispatchToProps = (dispatch, { timelineId }) => ({
   onScroll: debounce(() => {
     dispatch(scrollTopTimeline(timelineId, false));
   }, 100),
+
+  onLoadPending: () => dispatch(loadPending(timelineId)),
 
 });
 

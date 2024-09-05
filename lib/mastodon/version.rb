@@ -5,44 +5,55 @@ module Mastodon
     module_function
 
     def major
-      2
+      4
     end
 
     def minor
-      5
+      3
     end
 
     def patch
       0
     end
 
-    def pre
-      nil
+    def default_prerelease
+      'beta.1'
     end
 
-    def flags
-      ''
+    def prerelease
+      ENV['MASTODON_VERSION_PRERELEASE'].presence || default_prerelease
+    end
+
+    def build_metadata
+      ENV.fetch('MASTODON_VERSION_METADATA', nil)
     end
 
     def to_a
-      [major, minor, patch, pre].compact
+      [major, minor, patch].compact
     end
 
     def to_s
-      [to_a.join('.'), flags].join
+      components = [to_a.join('.')]
+      components << "-#{prerelease}" if prerelease.present?
+      components << "+#{build_metadata}" if build_metadata.present?
+      components.join
+    end
+
+    def gem_version
+      @gem_version ||= Gem::Version.new(to_s.split('+')[0])
     end
 
     def repository
-      'tootsuite/mastodon'
+      ENV.fetch('GITHUB_REPOSITORY', 'mastodon/mastodon')
     end
 
     def source_base_url
-      "https://github.com/#{repository}"
+      ENV.fetch('SOURCE_BASE_URL', "https://github.com/#{repository}")
     end
 
     # specify git tag or commit hash here
     def source_tag
-      nil
+      ENV.fetch('SOURCE_TAG', nil)
     end
 
     def source_url
@@ -54,7 +65,7 @@ module Mastodon
     end
 
     def user_agent
-      @user_agent ||= "#{HTTP::Request::USER_AGENT} (Mastodon/#{Version}; +http#{Rails.configuration.x.use_https ? 's' : ''}://#{Rails.configuration.x.web_domain}/)"
+      @user_agent ||= "Mastodon/#{Version} (#{HTTP::Request::USER_AGENT}; +http#{Rails.configuration.x.use_https ? 's' : ''}://#{Rails.configuration.x.web_domain}/)"
     end
   end
 end

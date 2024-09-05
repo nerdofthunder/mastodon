@@ -1,11 +1,13 @@
-require Rails.root.join('lib', 'mastodon', 'migration_helpers')
+# frozen_string_literal: true
+
+require_relative '../../lib/mastodon/migration_helpers'
+require_relative '../../lib/mastodon/migration_warning'
 
 class IdsToBigints < ActiveRecord::Migration[5.1]
   include Mastodon::MigrationHelpers
+  include Mastodon::MigrationWarning
 
-  disable_ddl_transaction!
-
-  INCLUDED_COLUMNS = [
+  TABLE_COLUMN_MAPPING = [
     [:account_domain_blocks, :account_id],
     [:account_domain_blocks, :id],
     [:accounts, :id],
@@ -65,28 +67,13 @@ class IdsToBigints < ActiveRecord::Migration[5.1]
     [:users, :id],
     [:web_settings, :id],
     [:web_settings, :user_id],
-  ]
-  INCLUDED_COLUMNS << [:deprecated_preview_cards, :id] if table_exists?(:deprecated_preview_cards)
+  ].freeze
+
+  disable_ddl_transaction!
 
   def migrate_columns(to_type)
-    # Print out a warning that this will probably take a while.
-    say ''
-    say 'WARNING: This migration may take a *long* time for large instances'
-    say 'It will *not* lock tables for any significant time, but it may run'
-    say 'for a very long time. We will pause for 10 seconds to allow you to'
-    say 'interrupt this migration if you are not ready.'
-    say ''
-    say 'This migration has some sections that can be safely interrupted'
-    say 'and restarted later, and will tell you when those are occurring.'
-    say ''
-    say 'For more information, see https://github.com/tootsuite/mastodon/pull/5088'
+    display_warning
 
-    10.downto(1) do |i|
-      say "Continuing in #{i} second#{i == 1 ? '' : 's'}...", true
-      sleep 1
-    end
-
-    tables = INCLUDED_COLUMNS.map(&:first).uniq
     table_sizes = {}
 
     # Sort tables by their size
@@ -94,7 +81,7 @@ class IdsToBigints < ActiveRecord::Migration[5.1]
       table_sizes[table] = estimate_rows_in_table(table)
     end
 
-    ordered_columns = INCLUDED_COLUMNS.sort_by do |col_parts|
+    ordered_columns = included_columns.sort_by do |col_parts|
       [-table_sizes[col_parts.first], col_parts.last]
     end
 
@@ -106,6 +93,25 @@ class IdsToBigints < ActiveRecord::Migration[5.1]
 
       change_column_type_concurrently table, column, to_type
       cleanup_concurrent_column_type_change table, column
+    end
+  end
+
+  def display_warning
+    migration_duration_warning(<<~EXPLANATION)
+      This migration has some sections that can be safely interrupted
+      and restarted later, and will tell you when those are occurring.
+
+      For more information, see https://github.com/mastodon/mastodon/pull/5088
+    EXPLANATION
+  end
+
+  def tables
+    included_columns.map(&:first).uniq
+  end
+
+  def included_columns
+    TABLE_COLUMN_MAPPING.dup.tap do |included_columns|
+      included_columns << [:deprecated_preview_cards, :id] if table_exists?(:deprecated_preview_cards)
     end
   end
 

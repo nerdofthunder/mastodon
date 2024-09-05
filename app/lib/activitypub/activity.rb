@@ -2,6 +2,11 @@
 
 class ActivityPub::Activity
   include JsonLdHelper
+  include Redisable
+  include Lockable
+
+  SUPPORTED_TYPES = %w(Note Question).freeze
+  CONVERTED_TYPES = %w(Image Audio Video Article Page Event).freeze
 
   def initialize(json, account, **options)
     @json    = json
@@ -17,7 +22,7 @@ class ActivityPub::Activity
   class << self
     def factory(json, account, **options)
       @json = json
-      klass&.new(json, account, options)
+      klass&.new(json, account, **options)
     end
 
     private
@@ -50,6 +55,8 @@ class ActivityPub::Activity
         ActivityPub::Activity::Add
       when 'Remove'
         ActivityPub::Activity::Remove
+      when 'Move'
+        ActivityPub::Activity::Move
       end
     end
   end
@@ -65,68 +72,108 @@ class ActivityPub::Activity
   end
 
   def object_uri
-    @object_uri ||= value_or_id(@object)
+    @object_uri ||= uri_from_bearcap(value_or_id(@object))
   end
 
-  def redis
-    Redis.current
+  def unsupported_object_type?
+    @object.is_a?(String) || !(supported_object_type? || converted_object_type?)
   end
 
-  def distribute(status)
-    crawl_links(status)
-
-    notify_about_reblog(status) if reblog_of_local_account?(status)
-    notify_about_mentions(status)
-
-    # Only continue if the status is supposed to have arrived in real-time.
-    # Note that if @options[:override_timestamps] isn't set, the status
-    # may have a lower snowflake id than other existing statuses, potentially
-    # "hiding" it from paginated API calls
-    return unless @options[:override_timestamps] || status.within_realtime_window?
-
-    distribute_to_followers(status)
+  def supported_object_type?
+    equals_or_includes_any?(@object['type'], SUPPORTED_TYPES)
   end
 
-  def reblog_of_local_account?(status)
-    status.reblog? && status.reblog.account.local?
-  end
-
-  def notify_about_reblog(status)
-    NotifyService.new.call(status.reblog.account, status)
-  end
-
-  def notify_about_mentions(status)
-    status.mentions.includes(:account).each do |mention|
-      next unless mention.account.local? && audience_includes?(mention.account)
-      NotifyService.new.call(mention.account, mention)
-    end
-  end
-
-  def crawl_links(status)
-    return if status.spoiler_text?
-
-    # Spread out crawling randomly to avoid DDoSing the link
-    LinkCrawlWorker.perform_in(rand(1..59).seconds, status.id)
-  end
-
-  def distribute_to_followers(status)
-    ::DistributionWorker.perform_async(status.id)
+  def converted_object_type?
+    equals_or_includes_any?(@object['type'], CONVERTED_TYPES)
   end
 
   def delete_arrived_first?(uri)
-    redis.exists("delete_upon_arrival:#{@account.id}:#{uri}")
+    redis.exists?("delete_upon_arrival:#{@account.id}:#{uri}")
   end
 
   def delete_later!(uri)
-    redis.setex("delete_upon_arrival:#{@account.id}:#{uri}", 6.hours.seconds, uri)
+    redis.setex("delete_upon_arrival:#{@account.id}:#{uri}", 6.hours.seconds, true)
+  end
+
+  def status_from_object
+    # If the status is already known, return it
+    status = status_from_uri(object_uri)
+
+    return status unless status.nil?
+
+    # If the boosted toot is embedded and it is a self-boost, handle it like a Create
+    unless unsupported_object_type?
+      actor_id = value_or_id(first_of_value(@object['attributedTo']))
+
+      if actor_id == @account.uri
+        virtual_object = { 'type' => 'Create', 'actor' => actor_id, 'object' => @object }
+        return ActivityPub::Activity.factory(virtual_object, @account, request_id: @options[:request_id]).perform
+      end
+    end
+
+    fetch_remote_original_status
+  end
+
+  def dereference_object!
+    return unless @object.is_a?(String)
+
+    dereferencer = ActivityPub::Dereferencer.new(@object, permitted_origin: @account.uri, signature_actor: signed_fetch_actor)
+
+    @object = dereferencer.object unless dereferencer.object.nil?
+  end
+
+  def signed_fetch_actor
+    return Account.find(@options[:delivered_to_account_id]) if @options[:delivered_to_account_id].present?
+
+    first_mentioned_local_account || first_local_follower
+  end
+
+  def first_mentioned_local_account
+    audience = (as_array(@json['to']) + as_array(@json['cc'])).map { |x| value_or_id(x) }.uniq
+    local_usernames = audience.select { |uri| ActivityPub::TagManager.instance.local_uri?(uri) }
+                              .map { |uri| ActivityPub::TagManager.instance.uri_to_local_id(uri, :username) }
+
+    return if local_usernames.empty?
+
+    Account.local.where(username: local_usernames).first
+  end
+
+  def first_local_follower
+    @account.followers.local.first
+  end
+
+  def follow_request_from_object
+    @follow_request_from_object ||= FollowRequest.find_by(target_account: @account, uri: object_uri) unless object_uri.nil?
+  end
+
+  def follow_from_object
+    @follow_from_object ||= ::Follow.find_by(target_account: @account, uri: object_uri) unless object_uri.nil?
   end
 
   def fetch_remote_original_status
     if object_uri.start_with?('http')
       return if ActivityPub::TagManager.instance.local_uri?(object_uri)
-      ActivityPub::FetchRemoteStatusService.new.call(object_uri, id: true, on_behalf_of: @account.followers.local.first)
+
+      ActivityPub::FetchRemoteStatusService.new.call(object_uri, on_behalf_of: @account.followers.local.first, request_id: @options[:request_id])
     elsif @object['url'].present?
-      ::FetchRemoteStatusService.new.call(@object['url'])
+      ::FetchRemoteStatusService.new.call(@object['url'], request_id: @options[:request_id])
     end
+  end
+
+  def fetch?
+    !@options[:delivery]
+  end
+
+  def followed_by_local_accounts?
+    @account.passive_relationships.exists? || (@options[:relayed_through_actor].is_a?(Account) && @options[:relayed_through_actor].passive_relationships&.exists?)
+  end
+
+  def requested_through_relay?
+    @options[:relayed_through_actor] && Relay.find_by(inbox_url: @options[:relayed_through_actor].inbox_url)&.enabled?
+  end
+
+  def reject_payload!
+    Rails.logger.info("Rejected #{@json['type']} activity #{@json['id']} from #{@account.uri}#{@options[:relayed_through_actor] && "via #{@options[:relayed_through_actor].uri}"}")
+    nil
   end
 end

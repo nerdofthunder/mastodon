@@ -1,80 +1,58 @@
 # frozen_string_literal: true
 
 module SettingsHelper
-  HUMAN_LOCALES = {
-    en: 'English',
-    ar: 'العربية',
-    ast: 'l\'asturianu',
-    bg: 'Български',
-    ca: 'Català',
-    co: 'Corsu',
-    cs: 'Čeština',
-    cy: 'Cymraeg',
-    da: 'Dansk',
-    de: 'Deutsch',
-    el: 'Ελληνικά',
-    eo: 'Esperanto',
-    es: 'Español',
-    eu: 'Euskara',
-    fa: 'فارسی',
-    fi: 'Suomi',
-    fr: 'Français',
-    gl: 'Galego',
-    he: 'עברית',
-    hr: 'Hrvatski',
-    hu: 'Magyar',
-    hy: 'Հայերեն',
-    id: 'Bahasa Indonesia',
-    io: 'Ido',
-    it: 'Italiano',
-    ja: '日本語',
-    ka: 'ქართული',
-    ko: '한국어',
-    nl: 'Nederlands',
-    no: 'Norsk',
-    oc: 'Occitan',
-    pl: 'Polszczyzna',
-    pt: 'Português',
-    'pt-BR': 'Português do Brasil',
-    ro: 'Limba română',
-    ru: 'Русский',
-    sk: 'Slovenčina',
-    sl: 'Slovenščina',
-    sr: 'Српски',
-    'sr-Latn': 'Srpski (latinica)',
-    sv: 'Svenska',
-    ta: 'தமிழ்',
-    te: 'తెలుగు',
-    th: 'ภาษาไทย',
-    tr: 'Türkçe',
-    uk: 'Українська',
-    zh: '中文',
-    'zh-CN': '简体中文',
-    'zh-HK': '繁體中文（香港）',
-    'zh-TW': '繁體中文（臺灣）',
-  }.freeze
-
-  def human_locale(locale)
-    HUMAN_LOCALES[locale]
-  end
-
   def filterable_languages
-    LanguageDetector.instance.language_names.select(&HUMAN_LOCALES.method(:key?))
+    LanguagesHelper.sorted_locale_keys(LanguagesHelper::SUPPORTED_LOCALES.keys)
   end
 
-  def hash_to_object(hash)
-    HashObject.new(hash)
+  def ui_languages
+    LanguagesHelper.sorted_locale_keys(I18n.available_locales)
+  end
+
+  def featured_tags_hint(recently_used_tags)
+    safe_join(
+      [
+        t('simple_form.hints.featured_tag.name'),
+        safe_join(
+          links_for_featured_tags(recently_used_tags),
+          ', '
+        ),
+      ],
+      ' '
+    )
   end
 
   def session_device_icon(session)
     device = session.detection.device
 
     if device.mobile?
-      'mobile'
+      'smartphone'
     elsif device.tablet?
       'tablet'
     else
-      'desktop'
+      'desktop_mac'
     end
+  end
+
+  def compact_account_link_to(account)
+    return if account.nil?
+
+    link_to ActivityPub::TagManager.instance.url_for(account), class: 'name-tag', title: account.acct do
+      safe_join([image_tag(account.avatar.url, width: 15, height: 15, alt: '', class: 'avatar'), content_tag(:span, account.acct, class: 'username')], ' ')
+    end
+  end
+
+  private
+
+  def links_for_featured_tags(tags)
+    tags.map { |tag| post_link_to_featured_tag(tag) }
+  end
+
+  def post_link_to_featured_tag(tag)
+    link_to(
+      "##{tag.display_name}",
+      settings_featured_tags_path(featured_tag: { name: tag.name }),
+      method: :post
+    )
   end
 end

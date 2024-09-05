@@ -6,15 +6,9 @@ module Admin
 
     def create
       authorize @user, :reset_password?
-      @user.send_reset_password_instructions
+      @user.reset_password!
       log_action :reset_password, @user
-      redirect_to admin_accounts_path
-    end
-
-    private
-
-    def set_user
-      @user = Account.find(params[:account_id]).user || raise(ActiveRecord::RecordNotFound)
+      redirect_to admin_account_path(@user.account_id)
     end
   end
 end

@@ -1,14 +1,9 @@
 # frozen_string_literal: true
 
-class Api::V1::Statuses::MutesController < Api::BaseController
-  include Authorization
-
+class Api::V1::Statuses::MutesController < Api::V1::Statuses::BaseController
   before_action -> { doorkeeper_authorize! :write, :'write:mutes' }
   before_action :require_user!
-  before_action :set_status
   before_action :set_conversation
-
-  respond_to :json
 
   def create
     current_account.mute_conversation!(@conversation)
@@ -25,14 +20,6 @@ class Api::V1::Statuses::MutesController < Api::BaseController
   end
 
   private
-
-  def set_status
-    @status = Status.find(params[:status_id])
-    authorize @status, :show?
-  rescue Mastodon::NotPermittedError
-    # Reraise in order to get a 404 instead of a 403 error code
-    raise ActiveRecord::RecordNotFound
-  end
 
   def set_conversation
     @conversation = @status.conversation

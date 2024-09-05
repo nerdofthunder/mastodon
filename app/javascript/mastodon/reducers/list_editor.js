@@ -1,4 +1,5 @@
 import { Map as ImmutableMap, List as ImmutableList } from 'immutable';
+
 import {
   LIST_CREATE_REQUEST,
   LIST_CREATE_FAIL,
@@ -22,7 +23,9 @@ import {
 const initialState = ImmutableMap({
   listId: null,
   isSubmitting: false,
+  isChanged: false,
   title: '',
+  isExclusive: false,
 
   accounts: ImmutableMap({
     items: ImmutableList(),
@@ -44,13 +47,20 @@ export default function listEditorReducer(state = initialState, action) {
     return state.withMutations(map => {
       map.set('listId', action.list.get('id'));
       map.set('title', action.list.get('title'));
+      map.set('isExclusive', action.list.get('is_exclusive'));
       map.set('isSubmitting', false);
     });
   case LIST_EDITOR_TITLE_CHANGE:
-    return state.set('title', action.value);
+    return state.withMutations(map => {
+      map.set('title', action.value);
+      map.set('isChanged', true);
+    });
   case LIST_CREATE_REQUEST:
   case LIST_UPDATE_REQUEST:
-    return state.set('isSubmitting', true);
+    return state.withMutations(map => {
+      map.set('isSubmitting', true);
+      map.set('isChanged', false);
+    });
   case LIST_CREATE_FAIL:
   case LIST_UPDATE_FAIL:
     return state.set('isSubmitting', false);
@@ -86,4 +96,4 @@ export default function listEditorReducer(state = initialState, action) {
   default:
     return state;
   }
-};
+}

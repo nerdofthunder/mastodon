@@ -2,108 +2,37 @@
 
 module Admin::ActionLogsHelper
   def log_target(log)
-    if log.target
-      linkable_log_target(log.target)
-    else
-      log_target_from_history(log.target_type, log.recorded_changes)
-    end
-  end
-
-  def linkable_log_target(record)
-    case record.class.name
+    case log.target_type
     when 'Account'
-      link_to record.acct, admin_account_path(record.id)
+      link_to (log.human_identifier.presence || I18n.t('admin.action_logs.deleted_account')), admin_account_path(log.target_id)
     when 'User'
-      link_to record.account.acct, admin_account_path(record.account_id)
-    when 'CustomEmoji'
-      record.shortcode
-    when 'Report'
-      link_to "##{record.id}", admin_report_path(record)
-    when 'DomainBlock', 'EmailDomainBlock'
-      link_to record.domain, "https://#{record.domain}"
-    when 'Status'
-      link_to record.account.acct, TagManager.instance.url_for(record)
-    end
-  end
-
-  def log_target_from_history(type, attributes)
-    case type
-    when 'CustomEmoji'
-      attributes['shortcode']
-    when 'DomainBlock', 'EmailDomainBlock'
-      link_to attributes['domain'], "https://#{attributes['domain']}"
-    when 'Status'
-      tmp_status = Status.new(attributes.except('reblogs_count', 'favourites_count'))
-      if tmp_status.account
-        link_to tmp_status.account&.acct || "##{tmp_status.account_id}", admin_account_path(tmp_status.account_id)
+      if log.route_param.present?
+        link_to log.human_identifier, admin_account_path(log.route_param)
       else
-        I18n.t('admin.action_logs.deleted_status')
+        I18n.t('admin.action_logs.deleted_account')
+      end
+    when 'UserRole'
+      link_to log.human_identifier, admin_roles_path(log.target_id)
+    when 'Report'
+      link_to "##{log.human_identifier.presence || log.target_id}", admin_report_path(log.target_id)
+    when 'Instance', 'DomainBlock', 'DomainAllow', 'UnavailableDomain'
+      log.human_identifier.present? ? link_to(log.human_identifier, admin_instance_path(log.human_identifier)) : I18n.t('admin.action_logs.unavailable_instance')
+    when 'Status'
+      link_to log.human_identifier, log.permalink
+    when 'AccountWarning'
+      link_to log.human_identifier, disputes_strike_path(log.target_id)
+    when 'Announcement'
+      link_to truncate(log.human_identifier), edit_admin_announcement_path(log.target_id)
+    when 'IpBlock', 'EmailDomainBlock', 'CustomEmoji'
+      log.human_identifier
+    when 'CanonicalEmailBlock'
+      content_tag(:samp, (log.human_identifier.presence || '')[0...7], title: log.human_identifier)
+    when 'Appeal'
+      if log.route_param.present?
+        link_to log.human_identifier, disputes_strike_path(log.route_param.presence)
+      else
+        I18n.t('admin.action_logs.deleted_account')
       end
     end
-  end
-
-  def relevant_log_changes(log)
-    if log.target_type == 'CustomEmoji' && [:enable, :disable, :destroy].include?(log.action)
-      log.recorded_changes.slice('domain')
-    elsif log.target_type == 'CustomEmoji' && log.action == :update
-      log.recorded_changes.slice('domain', 'visible_in_picker')
-    elsif log.target_type == 'User' && [:promote, :demote].include?(log.action)
-      log.recorded_changes.slice('moderator', 'admin')
-    elsif log.target_type == 'User' && [:change_email].include?(log.action)
-      log.recorded_changes.slice('email', 'unconfirmed_email')
-    elsif log.target_type == 'DomainBlock'
-      log.recorded_changes.slice('severity', 'reject_media')
-    elsif log.target_type == 'Status' && log.action == :update
-      log.recorded_changes.slice('sensitive')
-    end
-  end
-
-  def log_extra_attributes(hash)
-    safe_join(hash.to_a.map { |key, value| safe_join([content_tag(:span, key, class: 'diff-key'), '=', log_change(value)]) }, ' ')
-  end
-
-  def log_change(val)
-    return content_tag(:span, val, class: 'diff-neutral') unless val.is_a?(Array)
-    safe_join([content_tag(:span, val.first, class: 'diff-old'), content_tag(:span, val.last, class: 'diff-new')], '→')
-  end
-
-  def icon_for_log(log)
-    case log.target_type
-    when 'Account', 'User'
-      'user'
-    when 'CustomEmoji'
-      'file'
-    when 'Report'
-      'flag'
-    when 'DomainBlock'
-      'lock'
-    when 'EmailDomainBlock'
-      'envelope'
-    when 'Status'
-      'pencil'
-    end
-  end
-
-  def class_for_log_icon(log)
-    case log.action
-    when :enable, :unsuspend, :unsilence, :confirm, :promote, :resolve
-      'positive'
-    when :create
-      opposite_verbs?(log) ? 'negative' : 'positive'
-    when :update, :reset_password, :disable_2fa, :memorialize, :change_email
-      'neutral'
-    when :demote, :silence, :disable, :suspend, :remove_avatar, :reopen
-      'negative'
-    when :destroy
-      opposite_verbs?(log) ? 'positive' : 'negative'
-    else
-      ''
-    end
-  end
-
-  private
-
-  def opposite_verbs?(log)
-    %w(DomainBlock EmailDomainBlock).include?(log.target_type)
   end
 end

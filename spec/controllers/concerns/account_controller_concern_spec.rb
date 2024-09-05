@@ -2,17 +2,34 @@
 
 require 'rails_helper'
 
-describe ApplicationController, type: :controller do
-  controller do
+RSpec.describe AccountControllerConcern do
+  controller(ApplicationController) do
     include AccountControllerConcern
 
     def success
-      head 200
+      render plain: @account.username # rubocop:disable RSpec/InstanceVariable
     end
   end
 
   before do
     routes.draw { get 'success' => 'anonymous#success' }
+  end
+
+  context 'when account is unconfirmed' do
+    it 'returns http not found' do
+      account = Fabricate(:user, confirmed_at: nil).account
+      get 'success', params: { account_username: account.username }
+      expect(response).to have_http_status(404)
+    end
+  end
+
+  context 'when account is not approved' do
+    it 'returns http not found' do
+      Setting.registrations_mode = 'approved'
+      account = Fabricate(:user, approved: false).account
+      get 'success', params: { account_username: account.username }
+      expect(response).to have_http_status(404)
+    end
   end
 
   context 'when account is suspended' do
@@ -23,23 +40,31 @@ describe ApplicationController, type: :controller do
     end
   end
 
+  context 'when account is deleted by owner' do
+    it 'returns http gone' do
+      account = Fabricate(:account, suspended: true, user: nil)
+      get 'success', params: { account_username: account.username }
+      expect(response).to have_http_status(410)
+    end
+  end
+
   context 'when account is not suspended' do
-    it 'assigns @account' do
-      account = Fabricate(:account)
-      get 'success', params: { account_username: account.username }
-      expect(assigns(:account)).to eq account
-    end
+    let(:account) { Fabricate(:account, username: 'username') }
 
-    it 'sets link headers' do
-      account = Fabricate(:account, username: 'username')
-      get 'success', params: { account_username: 'username' }
-      expect(response.headers['Link'].to_s).to eq '<http://test.host/.well-known/webfinger?resource=acct%3Ausername%40cb6e6126.ngrok.io>; rel="lrdd"; type="application/xrd+xml", <http://test.host/users/username.atom>; rel="alternate"; type="application/atom+xml", <https://cb6e6126.ngrok.io/users/username>; rel="alternate"; type="application/activity+json"'
-    end
-
-    it 'returns http success' do
-      account = Fabricate(:account)
+    it 'Prepares the account, returns success, and sets link headers' do
       get 'success', params: { account_username: account.username }
+
       expect(response).to have_http_status(200)
+      expect(response.headers['Link'].to_s).to eq(expected_link_headers)
+      expect(response.body)
+        .to include(account.username)
+    end
+
+    def expected_link_headers
+      [
+        '<http://test.host/.well-known/webfinger?resource=acct%3Ausername%40cb6e6126.ngrok.io>; rel="lrdd"; type="application/jrd+json"',
+        '<https://cb6e6126.ngrok.io/users/username>; rel="alternate"; type="application/activity+json"',
+      ].join(', ')
     end
   end
 end

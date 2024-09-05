@@ -1,6 +1,10 @@
+# frozen_string_literal: true
+
 require 'rails_helper'
 
 RSpec.describe ActivityPub::Activity::Undo do
+  subject { described_class.new(json, sender) }
+
   let(:sender) { Fabricate(:account, domain: 'example.com') }
 
   let(:json) do
@@ -12,8 +16,6 @@ RSpec.describe ActivityPub::Activity::Undo do
       object: object_json,
     }.with_indifferent_access
   end
-
-  subject { described_class.new(json, sender) }
 
   describe '#perform' do
     context 'with Announce' do
@@ -29,7 +31,7 @@ RSpec.describe ActivityPub::Activity::Undo do
         }
       end
 
-      context do
+      context 'when not atomUri' do
         before do
           Fabricate(:status, reblog: status, account: sender, uri: 'bar')
         end
@@ -46,6 +48,19 @@ RSpec.describe ActivityPub::Activity::Undo do
         end
 
         it 'deletes the reblog by atomUri' do
+          subject.perform
+          expect(sender.reblogged?(status)).to be false
+        end
+      end
+
+      context 'with only object uri' do
+        let(:object_json) { 'bar' }
+
+        before do
+          Fabricate(:status, reblog: status, account: sender, uri: 'bar')
+        end
+
+        it 'deletes the reblog by uri' do
           subject.perform
           expect(sender.reblogged?(status)).to be false
         end
@@ -91,12 +106,21 @@ RSpec.describe ActivityPub::Activity::Undo do
       end
 
       before do
-        sender.block!(recipient)
+        sender.block!(recipient, uri: 'bar')
       end
 
       it 'deletes block from sender to recipient' do
         subject.perform
         expect(sender.blocking?(recipient)).to be false
+      end
+
+      context 'with only object uri' do
+        let(:object_json) { 'bar' }
+
+        it 'deletes block from sender to recipient' do
+          subject.perform
+          expect(sender.blocking?(recipient)).to be false
+        end
       end
     end
 
@@ -113,12 +137,21 @@ RSpec.describe ActivityPub::Activity::Undo do
       end
 
       before do
-        sender.follow!(recipient)
+        sender.follow!(recipient, uri: 'bar')
       end
 
       it 'deletes follow from sender to recipient' do
         subject.perform
         expect(sender.following?(recipient)).to be false
+      end
+
+      context 'with only object uri' do
+        let(:object_json) { 'bar' }
+
+        it 'deletes follow from sender to recipient' do
+          subject.perform
+          expect(sender.following?(recipient)).to be false
+        end
       end
     end
 

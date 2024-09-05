@@ -4,16 +4,18 @@
 - if policy(:invite).create?
   %p= t('invites.prompt')
 
-  = render 'form'
+  = simple_form_for(@invite, url: invites_path) do |form|
+    = render partial: 'form', object: form
 
-  %hr/
+  %hr.spacer/
 
-%table.table
-  %thead
-    %tr
-      %th= t('invites.table.uses')
-      %th= t('invites.table.expires_at')
-      %th
-      %th
-  %tbody
-    = render @invites
+.simple_form
+  %table.table.table--invites
+    %thead
+      %tr
+        %th
+        %th= t('invites.table.uses')
+        %th= t('invites.table.expires_at')
+        %th
+    %tbody
+      = render @invites

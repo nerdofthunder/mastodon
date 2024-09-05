@@ -1,12 +1,14 @@
+# frozen_string_literal: true
+
 require 'rails_helper'
 
-RSpec.describe UnfollowService, type: :service do
+RSpec.describe UnfollowService do
+  subject { described_class.new }
+
   let(:sender) { Fabricate(:account, username: 'alice') }
 
-  subject { UnfollowService.new }
-
   describe 'local' do
-    let(:bob) { Fabricate(:user, email: 'bob@example.com', account: Fabricate(:account, username: 'bob')).account }
+    let(:bob) { Fabricate(:account, username: 'bob') }
 
     before do
       sender.follow!(bob)
@@ -18,29 +20,8 @@ RSpec.describe UnfollowService, type: :service do
     end
   end
 
-  describe 'remote OStatus' do
-    let(:bob) { Fabricate(:user, email: 'bob@example.com', account: Fabricate(:account, username: 'bob', protocol: :ostatus, domain: 'example.com', salmon_url: 'http://salmon.example.com')).account }
-
-    before do
-      sender.follow!(bob)
-      stub_request(:post, "http://salmon.example.com/").to_return(:status => 200, :body => "", :headers => {})
-      subject.call(sender, bob)
-    end
-
-    it 'destroys the following relation' do
-      expect(sender.following?(bob)).to be false
-    end
-
-    it 'sends an unfollow salmon slap' do
-      expect(a_request(:post, "http://salmon.example.com/").with { |req|
-        xml = OStatus2::Salmon.new.unpack(req.body)
-        xml.match(OStatus::TagManager::VERBS[:unfollow])
-      }).to have_been_made.once
-    end
-  end
-
-  describe 'remote ActivityPub' do
-    let(:bob) { Fabricate(:user, email: 'bob@example.com', account: Fabricate(:account, username: 'bob', protocol: :activitypub, domain: 'example.com', inbox_url: 'http://example.com/inbox')).account }
+  describe 'remote ActivityPub', :inline_jobs do
+    let(:bob) { Fabricate(:account, username: 'bob', protocol: :activitypub, domain: 'example.com', inbox_url: 'http://example.com/inbox') }
 
     before do
       sender.follow!(bob)
@@ -53,6 +34,24 @@ RSpec.describe UnfollowService, type: :service do
     end
 
     it 'sends an unfollow activity' do
+      expect(a_request(:post, 'http://example.com/inbox')).to have_been_made.once
+    end
+  end
+
+  describe 'remote ActivityPub (reverse)', :inline_jobs do
+    let(:bob) { Fabricate(:account, username: 'bob', protocol: :activitypub, domain: 'example.com', inbox_url: 'http://example.com/inbox') }
+
+    before do
+      bob.follow!(sender)
+      stub_request(:post, 'http://example.com/inbox').to_return(status: 200)
+      subject.call(bob, sender)
+    end
+
+    it 'destroys the following relation' do
+      expect(bob.following?(sender)).to be false
+    end
+
+    it 'sends a reject activity' do
       expect(a_request(:post, 'http://example.com/inbox')).to have_been_made.once
     end
   end

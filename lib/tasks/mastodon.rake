@@ -1,8 +1,5 @@
 # frozen_string_literal: true
 
-require 'optparse'
-require 'colorize'
-require 'tty-command'
 require 'tty-prompt'
 
 namespace :mastodon do
@@ -11,12 +8,22 @@ namespace :mastodon do
     prompt = TTY::Prompt.new
     env    = {}
 
+    # When the application code gets loaded, it runs `lib/mastodon/redis_configuration.rb`.
+    # This happens before application environment configuration and sets REDIS_URL etc.
+    # These variables are then used even when REDIS_HOST etc. are changed, so clear them
+    # out so they don't interfere with our new configuration.
+    ENV.delete('REDIS_URL')
+    ENV.delete('CACHE_REDIS_URL')
+    ENV.delete('SIDEKIQ_REDIS_URL')
+
     begin
+      errors = false
+
       prompt.say('Your instance is identified by its domain name. Changing it afterward will break things.')
       env['LOCAL_DOMAIN'] = prompt.ask('Domain name:') do |q|
         q.required true
         q.modify :strip
-        q.validate(/\A[a-z0-9\.\-]+\z/i)
+        q.validate(/\A[a-z0-9.-]+\z/i)
         q.messages[:valid?] = 'Invalid domain. If you intend to use unicode characters, enter punycode here'
       end
 
@@ -27,6 +34,15 @@ namespace :mastodon do
 
       %w(SECRET_KEY_BASE OTP_SECRET).each do |key|
         env[key] = SecureRandom.hex(64)
+      end
+
+      # Required by ActiveRecord encryption feature
+      %w(
+        ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY
+        ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT
+        ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY
+      ).each do |key|
+        env[key] = SecureRandom.alphanumeric(32)
       end
 
       vapid_key = Webpush.generate_key
@@ -87,10 +103,15 @@ namespace :mastodon do
           prompt.ok 'Database configuration works! 🎆'
           db_connection_works = true
           break
-        rescue StandardError => e
+        rescue => e
           prompt.error 'Database connection could not be established with this configuration, try again.'
           prompt.error e.message
-          break unless prompt.yes?('Try again?')
+          unless prompt.yes?('Try again?')
+            return prompt.warn 'Nothing saved. Bye!' unless prompt.yes?('Continue anyway?')
+
+            errors = true
+            break
+          end
         end
       end
 
@@ -127,17 +148,56 @@ namespace :mastodon do
           redis.ping
           prompt.ok 'Redis configuration works! 🎆'
           break
-        rescue StandardError => e
+        rescue => e
           prompt.error 'Redis connection could not be established with this configuration, try again.'
           prompt.error e.message
-          break unless prompt.yes?('Try again?')
+
+          unless prompt.yes?('Try again?')
+            return prompt.warn 'Nothing saved. Bye!' unless prompt.yes?('Continue anyway?')
+
+            errors = true
+            break
+          end
         end
       end
 
       prompt.say "\n"
 
       if prompt.yes?('Do you want to store uploaded files on the cloud?', default: false)
-        case prompt.select('Provider', ['Amazon S3', 'Wasabi', 'Minio'])
+        case prompt.select('Provider', ['DigitalOcean Spaces', 'Amazon S3', 'Wasabi', 'Minio', 'Google Cloud Storage', 'Storj DCS'])
+        when 'DigitalOcean Spaces'
+          env['S3_ENABLED'] = 'true'
+          env['S3_PROTOCOL'] = 'https'
+
+          env['S3_BUCKET'] = prompt.ask('Space name:') do |q|
+            q.required true
+            q.default "files.#{env['LOCAL_DOMAIN']}"
+            q.modify :strip
+          end
+
+          env['S3_REGION'] = prompt.ask('Space region:') do |q|
+            q.required true
+            q.default 'nyc3'
+            q.modify :strip
+          end
+
+          env['S3_HOSTNAME'] = prompt.ask('Space endpoint:') do |q|
+            q.required true
+            q.default 'nyc3.digitaloceanspaces.com'
+            q.modify :strip
+          end
+
+          env['S3_ENDPOINT'] = "https://#{env['S3_HOSTNAME']}"
+
+          env['AWS_ACCESS_KEY_ID'] = prompt.ask('Space access key:') do |q|
+            q.required true
+            q.modify :strip
+          end
+
+          env['AWS_SECRET_ACCESS_KEY'] = prompt.ask('Space secret key:') do |q|
+            q.required true
+            q.modify :strip
+          end
         when 'Amazon S3'
           env['S3_ENABLED']  = 'true'
           env['S3_PROTOCOL'] = 'https'
@@ -156,7 +216,7 @@ namespace :mastodon do
 
           env['S3_HOSTNAME'] = prompt.ask('S3 hostname:') do |q|
             q.required true
-            q.default 's3-us-east-1.amazonaws.com'
+            q.default 's3.us-east-1.amazonaws.com'
             q.modify :strip
           end
 
@@ -202,7 +262,7 @@ namespace :mastodon do
           end
 
           env['S3_PROTOCOL'] = env['S3_ENDPOINT'].start_with?('https') ? 'https' : 'http'
-          env['S3_HOSTNAME'] = env['S3_ENDPOINT'].gsub(/\Ahttps?:\/\//, '')
+          env['S3_HOSTNAME'] = env['S3_ENDPOINT'].gsub(%r{\Ahttps?://}, '')
 
           env['S3_BUCKET'] = prompt.ask('Minio bucket name:') do |q|
             q.required true
@@ -216,6 +276,70 @@ namespace :mastodon do
           end
 
           env['AWS_SECRET_ACCESS_KEY'] = prompt.ask('Minio secret key:') do |q|
+            q.required true
+            q.modify :strip
+          end
+        when 'Storj DCS'
+          env['S3_ENABLED']  = 'true'
+          env['S3_PROTOCOL'] = 'https'
+          env['S3_REGION']   = 'global'
+
+          env['S3_ENDPOINT'] = prompt.ask('Storj DCS endpoint URL:') do |q|
+            q.required true
+            q.default 'https://gateway.storjshare.io'
+            q.modify :strip
+          end
+
+          env['S3_PROTOCOL'] = env['S3_ENDPOINT'].start_with?('https') ? 'https' : 'http'
+          env['S3_HOSTNAME'] = env['S3_ENDPOINT'].gsub(%r{\Ahttps?://}, '')
+
+          env['S3_BUCKET'] = prompt.ask('Storj DCS bucket name:') do |q|
+            q.required true
+            q.default "files.#{env['LOCAL_DOMAIN']}"
+            q.modify :strip
+          end
+
+          env['AWS_ACCESS_KEY_ID'] = prompt.ask('Storj Gateway access key (uplink share --register --readonly=false --not-after=none sj://bucket):') do |q|
+            q.required true
+            q.modify :strip
+          end
+
+          env['AWS_SECRET_ACCESS_KEY'] = prompt.ask('Storj Gateway secret key:') do |q|
+            q.required true
+            q.modify :strip
+          end
+
+          linksharing_access_key = prompt.ask('Storj Linksharing access key (uplink share --register --public --readonly=true --disallow-lists --not-after=none sj://bucket):') do |q|
+            q.required true
+            q.modify :strip
+          end
+          env['S3_ALIAS_HOST'] = "link.storjshare.io/raw/#{linksharing_access_key}/#{env['S3_BUCKET']}"
+
+        when 'Google Cloud Storage'
+          env['S3_ENABLED']             = 'true'
+          env['S3_PROTOCOL']            = 'https'
+          env['S3_HOSTNAME']            = 'storage.googleapis.com'
+          env['S3_ENDPOINT']            = 'https://storage.googleapis.com'
+          env['S3_MULTIPART_THRESHOLD'] = 50.megabytes
+
+          env['S3_BUCKET'] = prompt.ask('GCS bucket name:') do |q|
+            q.required true
+            q.default "files.#{env['LOCAL_DOMAIN']}"
+            q.modify :strip
+          end
+
+          env['S3_REGION'] = prompt.ask('GCS region:') do |q|
+            q.required true
+            q.default 'us-west1'
+            q.modify :strip
+          end
+
+          env['AWS_ACCESS_KEY_ID'] = prompt.ask('GCS access key:') do |q|
+            q.required true
+            q.modify :strip
+          end
+
+          env['AWS_SECRET_ACCESS_KEY'] = prompt.ask('GCS secret key:') do |q|
             q.required true
             q.modify :strip
           end
@@ -238,6 +362,7 @@ namespace :mastodon do
           env['SMTP_PORT'] = 25
           env['SMTP_AUTH_METHOD'] = 'none'
           env['SMTP_OPENSSL_VERIFY_MODE'] = 'none'
+          env['SMTP_ENABLE_STARTTLS'] = 'auto'
         else
           env['SMTP_SERVER'] = prompt.ask('SMTP server:') do |q|
             q.required true
@@ -266,6 +391,8 @@ namespace :mastodon do
           end
 
           env['SMTP_OPENSSL_VERIFY_MODE'] = prompt.select('SMTP OpenSSL verify mode:', %w(none peer client_once fail_if_no_peer_cert))
+
+          env['SMTP_ENABLE_STARTTLS'] = prompt.select('Enable STARTTLS:', %w(auto always never))
         end
 
         env['SMTP_FROM_ADDRESS'] = prompt.ask('E-mail address to send e-mails "from":') do |q|
@@ -279,43 +406,82 @@ namespace :mastodon do
         send_to = prompt.ask('Send test e-mail to:', required: true)
 
         begin
+          enable_starttls = nil
+          enable_starttls_auto = nil
+
+          case env['SMTP_ENABLE_STARTTLS']
+          when 'always'
+            enable_starttls = true
+          when 'never'
+            enable_starttls = false
+          when 'auto'
+            enable_starttls_auto = true
+          else
+            enable_starttls_auto = env['SMTP_ENABLE_STARTTLS_AUTO'] != 'false'
+          end
+
           ActionMailer::Base.smtp_settings = {
-            port:                 env['SMTP_PORT'],
-            address:              env['SMTP_SERVER'],
-            user_name:            env['SMTP_LOGIN'].presence,
-            password:             env['SMTP_PASSWORD'].presence,
-            domain:               env['LOCAL_DOMAIN'],
-            authentication:       env['SMTP_AUTH_METHOD'] == 'none' ? nil : env['SMTP_AUTH_METHOD'] || :plain,
-            openssl_verify_mode:  env['SMTP_OPENSSL_VERIFY_MODE'],
-            enable_starttls_auto: true,
+            port: env['SMTP_PORT'],
+            address: env['SMTP_SERVER'],
+            user_name: env['SMTP_LOGIN'].presence,
+            password: env['SMTP_PASSWORD'].presence,
+            domain: env['LOCAL_DOMAIN'],
+            authentication: env['SMTP_AUTH_METHOD'] == 'none' ? nil : env['SMTP_AUTH_METHOD'] || :plain,
+            openssl_verify_mode: env['SMTP_OPENSSL_VERIFY_MODE'],
+            enable_starttls: enable_starttls,
+            enable_starttls_auto: enable_starttls_auto,
           }
 
           ActionMailer::Base.default_options = {
             from: env['SMTP_FROM_ADDRESS'],
           }
 
-          mail = ActionMailer::Base.new.mail to: send_to, subject: 'Test', body: 'Mastodon SMTP configuration works!'
+          mail = ActionMailer::Base.new.mail(
+            to: send_to,
+            subject: 'Test', # rubocop:disable Rails/I18nLocaleTexts
+            body: 'Mastodon SMTP configuration works!'
+          )
           mail.deliver
           break
-        rescue StandardError => e
+        rescue => e
           prompt.error 'E-mail could not be sent with this configuration, try again.'
           prompt.error e.message
-          break unless prompt.yes?('Try again?')
+
+          unless prompt.yes?('Try again?')
+            return prompt.warn 'Nothing saved. Bye!' unless prompt.yes?('Continue anyway?')
+
+            errors = true
+            break
+          end
         end
       end
+
+      prompt.say "\n"
+
+      env['UPDATE_CHECK_URL'] = '' unless prompt.yes?('Do you want Mastodon to periodically check for important updates and notify you? (Recommended)', default: true)
 
       prompt.say "\n"
       prompt.say 'This configuration will be written to .env.production'
 
       if prompt.yes?('Save configuration?')
-        cmd = TTY::Command.new(printer: :quiet)
+        incompatible_syntax = false
 
-        File.write(Rails.root.join('.env.production'), "# Generated with mastodon:setup on #{Time.now.utc}\n\n" + env.each_pair.map { |key, value| "#{key}=#{value}" }.join("\n") + "\n")
+        env_contents = env.each_pair.map do |key, value|
+          value = value.to_s
+          escaped = dotenv_escape(value)
+          incompatible_syntax = true if value != escaped
+
+          "#{key}=#{escaped}"
+        end.join("\n")
+
+        generated_header = generate_header(incompatible_syntax)
+
+        Rails.root.join('.env.production').write("#{generated_header}#{env_contents}\n")
 
         if using_docker
           prompt.ok 'Below is your configuration, save it to an .env.production file outside Docker:'
           prompt.say "\n"
-          prompt.say File.read(Rails.root.join('.env.production'))
+          prompt.say "#{generated_header}#{env.each_pair.map { |key, value| "#{key}=#{value}" }.join("\n")}"
           prompt.say "\n"
           prompt.ok 'It is also saved within this container so you can proceed with this wizard.'
         end
@@ -328,30 +494,38 @@ namespace :mastodon do
           prompt.say 'Running `RAILS_ENV=production rails db:setup` ...'
           prompt.say "\n\n"
 
-          if cmd.run!({ RAILS_ENV: 'production', SAFETY_ASSURED: 1 }, :rails, 'db:setup').failure?
-            prompt.error 'That failed! Perhaps your configuration is not right'
-          else
+          if system(env.transform_values(&:to_s).merge({ 'RAILS_ENV' => 'production', 'SAFETY_ASSURED' => '1' }), 'rails db:setup')
             prompt.ok 'Done!'
-          end
-        end
-
-        prompt.say "\n"
-        prompt.say 'The final step is compiling CSS/JS assets.'
-        prompt.say 'This may take a while and consume a lot of RAM.'
-
-        if prompt.yes?('Compile the assets now?')
-          prompt.say 'Running `RAILS_ENV=production rails assets:precompile` ...'
-          prompt.say "\n\n"
-
-          if cmd.run!({ RAILS_ENV: 'production' }, :rails, 'assets:precompile').failure?
-            prompt.error 'That failed! Maybe you need swap space?'
           else
-            prompt.say 'Done!'
+            prompt.error 'That failed! Perhaps your configuration is not right'
+            errors = true
+          end
+        end
+
+        unless using_docker
+          prompt.say "\n"
+          prompt.say 'The final step is compiling CSS/JS assets.'
+          prompt.say 'This may take a while and consume a lot of RAM.'
+
+          if prompt.yes?('Compile the assets now?')
+            prompt.say 'Running `RAILS_ENV=production rails assets:precompile` ...'
+            prompt.say "\n\n"
+
+            if system(env.transform_values(&:to_s).merge({ 'RAILS_ENV' => 'production' }), 'rails assets:precompile')
+              prompt.say 'Done!'
+            else
+              prompt.error 'That failed! Maybe you need swap space?'
+              errors = true
+            end
           end
         end
 
         prompt.say "\n"
-        prompt.ok 'All done! You can now power on the Mastodon server 🐘'
+        if errors
+          prompt.warn 'Your Mastodon server is set up, but there were some errors along the way, you may have to fix them.'
+        else
+          prompt.ok 'All done! You can now power on the Mastodon server 🐘'
+        end
         prompt.say "\n"
 
         if db_connection_works && prompt.yes?('Do you want to create an admin user straight away?')
@@ -376,8 +550,12 @@ namespace :mastodon do
 
           password = SecureRandom.hex(16)
 
-          user = User.new(admin: true, email: email, password: password, confirmed_at: Time.now.utc, account_attributes: { username: username })
+          owner_role = UserRole.find_by(name: 'Owner')
+          user = User.new(email: email, password: password, confirmed_at: Time.now.utc, account_attributes: { username: username }, bypass_invite_request_check: true, role: owner_role)
           user.save(validate: false)
+          user.approve!
+
+          Setting.site_contact_username = username
 
           prompt.ok "You can login with the password: #{password}"
           prompt.warn 'You can change your password once you login.'
@@ -390,400 +568,24 @@ namespace :mastodon do
     end
   end
 
-  desc 'Turn a user into an admin, identified by the USERNAME environment variable'
-  task make_admin: :environment do
-    include RoutingHelper
-
-    account_username = ENV.fetch('USERNAME')
-    user             = User.joins(:account).where(accounts: { username: account_username })
-
-    if user.present?
-      user.update(admin: true)
-      puts "Congrats! #{account_username} is now an admin. \\o/\nNavigate to #{edit_admin_settings_url} to get started"
-    else
-      puts "User could not be found; please make sure an account with the `#{account_username}` username exists."
-    end
-  end
-
-  desc 'Turn a user into a moderator, identified by the USERNAME environment variable'
-  task make_mod: :environment do
-    account_username = ENV.fetch('USERNAME')
-    user             = User.joins(:account).where(accounts: { username: account_username })
-
-    if user.present?
-      user.update(moderator: true)
-      puts "Congrats! #{account_username} is now a moderator \\o/"
-    else
-      puts "User could not be found; please make sure an account with the `#{account_username}` username exists."
-    end
-  end
-
-  desc 'Remove admin and moderator privileges from user identified by the USERNAME environment variable'
-  task revoke_staff: :environment do
-    account_username = ENV.fetch('USERNAME')
-    user             = User.joins(:account).where(accounts: { username: account_username })
-
-    if user.present?
-      user.update(moderator: false, admin: false)
-      puts "#{account_username} is no longer admin or moderator."
-    else
-      puts "User could not be found; please make sure an account with the `#{account_username}` username exists."
-    end
-  end
-
-  desc 'Manually confirms a user with associated user email address stored in USER_EMAIL environment variable.'
-  task confirm_email: :environment do
-    email = ENV.fetch('USER_EMAIL')
-    user  = User.find_by(email: email)
-
-    if user
-      user.update(confirmed_at: Time.now.utc)
-      puts "#{email} confirmed"
-    else
-      abort "#{email} not found"
-    end
-  end
-
-  desc 'Add a user by providing their email, username and initial password.' \
-       'The user will receive a confirmation email, then they must reset their password before logging in.'
-  task add_user: :environment do
-    disable_log_stdout!
-
-    prompt = TTY::Prompt.new
-
-    begin
-      email = prompt.ask('E-mail:', required: true) do |q|
-        q.modify :strip
-      end
-
-      username = prompt.ask('Username:', required: true) do |q|
-        q.modify :strip
-      end
-
-      role = prompt.select('Role:', %w(user moderator admin))
-
-      if prompt.yes?('Proceed to create the user?')
-        user = User.new(email: email, password: SecureRandom.hex, admin: role == 'admin', moderator: role == 'moderator', account_attributes: { username: username })
-
-        if user.save
-          prompt.ok 'User created and confirmation mail sent to the user\'s email address.'
-          prompt.ok "Here is the random password generated for the user: #{user.password}"
-        else
-          prompt.warn 'User was not created because of the following errors:'
-
-          user.errors.each do |key, val|
-            prompt.error "#{key}: #{val}"
-          end
-        end
-      else
-        prompt.ok 'Aborting. Bye!'
-      end
-    rescue TTY::Reader::InputInterrupt
-      prompt.ok 'Aborting. Bye!'
-    end
-  end
-
-  namespace :media do
-    desc 'Remove media attachments attributed to silenced accounts'
-    task remove_silenced: :environment do
-      nb_media_attachments = 0
-      MediaAttachment.where(account: Account.silenced).select(:id).reorder(nil).find_in_batches do |media_attachments|
-        nb_media_attachments += media_attachments.length
-        Maintenance::DestroyMediaWorker.push_bulk(media_attachments.map(&:id))
-      end
-      puts "Scheduled the deletion of #{nb_media_attachments} media attachments"
-    end
-
-    desc 'Remove cached remote media attachments that are older than NUM_DAYS. By default 7 (week)'
-    task remove_remote: :environment do
-      puts 'Please use `./bin/tootctl media remove --help` directly'.colorize(:yellow)
-      require_relative '../mastodon/media_cli'
-      cli = Mastodon::MediaCLI.new([], days: (ENV['NUM_DAYS'] || 7).to_i)
-      cli.invoke(:remove)
-    end
-
-    desc 'Set unknown attachment type for remote-only attachments'
-    task set_unknown: :environment do
-      puts 'Setting unknown attachment type for remote-only attachments...'
-      MediaAttachment.where(file_file_name: nil).where.not(type: :unknown).in_batches.update_all(type: :unknown)
-      puts 'Done!'
-    end
-
-    desc 'Redownload avatars/headers of remote users. Optionally limit to a particular domain with DOMAIN'
-    task redownload_avatars: :environment do
-      accounts = Account.remote
-      accounts = accounts.where(domain: ENV['DOMAIN']) if ENV['DOMAIN'].present?
-      nb_accounts = 0
-
-      accounts.select(:id).reorder(nil).find_in_batches do |accounts_batch|
-        nb_accounts += accounts_batch.length
-        Maintenance::RedownloadAccountMediaWorker.push_bulk(accounts_batch.map(&:id))
-      end
-      puts "Scheduled the download of avatars/headers for #{nb_accounts} remote users"
-    end
-  end
-
-  namespace :push do
-    desc 'Unsubscribes from PuSH updates of feeds nobody follows locally'
-    task clear: :environment do
-      Pubsubhubbub::UnsubscribeWorker.push_bulk(Account.remote.without_followers.where.not(subscription_expires_at: nil).pluck(:id))
-    end
-  end
-
-  namespace :feeds do
-    desc 'Clear all timelines without regenerating them'
-    task clear_all: :environment do
-      Redis.current.keys('feed:*').each { |key| Redis.current.del(key) }
-    end
-
-    desc 'Generates home timelines for users who logged in in the past two weeks'
-    task build: :environment do
-      User.active.select(:id, :account_id).reorder(nil).find_in_batches do |users|
-        RegenerationWorker.push_bulk(users.map(&:account_id))
-      end
-    end
-  end
-
-  namespace :users do
-    desc 'List e-mails of all admin users'
-    task admins: :environment do
-      puts 'Admin user emails:'
-      puts User.admins.map(&:email).join("\n")
-    end
-  end
-
-  namespace :settings do
-    desc 'Open registrations on this instance'
-    task open_registrations: :environment do
-      Setting.open_registrations = true
-    end
-
-    desc 'Close registrations on this instance'
-    task close_registrations: :environment do
-      Setting.open_registrations = false
-    end
-  end
-
   namespace :webpush do
     desc 'Generate VAPID key'
-    task generate_vapid_key: :environment do
+    task :generate_vapid_key do
       vapid_key = Webpush.generate_key
       puts "VAPID_PRIVATE_KEY=#{vapid_key.private_key}"
       puts "VAPID_PUBLIC_KEY=#{vapid_key.public_key}"
     end
   end
 
-  namespace :maintenance do
-    desc 'Update counter caches'
-    task update_counter_caches: :environment do
-      puts 'Updating counter caches for accounts...'
+  private
 
-      Account.unscoped.where.not(protocol: :activitypub).select('id').find_in_batches do |batch|
-        Account.where(id: batch.map(&:id)).update_all('statuses_count = (select count(*) from statuses where account_id = accounts.id), followers_count = (select count(*) from follows where target_account_id = accounts.id), following_count = (select count(*) from follows where account_id = accounts.id)')
-      end
+  def generate_header(include_warning)
+    default_message = "# Generated with mastodon:setup on #{Time.now.utc}\n\n"
 
-      puts 'Updating counter caches for statuses...'
-
-      Status.unscoped.select('id').find_in_batches do |batch|
-        Status.where(id: batch.map(&:id)).update_all('favourites_count = (select count(*) from favourites where favourites.status_id = statuses.id), reblogs_count = (select count(*) from statuses as reblogs where reblogs.reblog_of_id = statuses.id)')
-      end
-
-      puts 'Done!'
-    end
-
-    desc 'Generate static versions of GIF avatars/headers'
-    task add_static_avatars: :environment do
-      puts 'Generating static avatars/headers for GIF ones...'
-
-      Account.unscoped.where(avatar_content_type: 'image/gif').or(Account.unscoped.where(header_content_type: 'image/gif')).find_each do |account|
-        begin
-          account.avatar.reprocess! if account.avatar_content_type == 'image/gif' && !account.avatar.exists?(:static)
-          account.header.reprocess! if account.header_content_type == 'image/gif' && !account.header.exists?(:static)
-        rescue StandardError => e
-          Rails.logger.error "Error while generating static avatars/headers for account #{account.id}: #{e}"
-          next
-        end
-      end
-
-      puts 'Done!'
-    end
-
-    desc 'Ensure referencial integrity'
-    task prepare_for_foreign_keys: :environment do
-      # All the deletes:
-      ActiveRecord::Base.connection.execute('DELETE FROM statuses USING statuses s LEFT JOIN accounts a ON a.id = s.account_id WHERE statuses.id = s.id AND a.id IS NULL')
-
-      if ActiveRecord::Base.connection.table_exists? :account_domain_blocks
-        ActiveRecord::Base.connection.execute('DELETE FROM account_domain_blocks USING account_domain_blocks adb LEFT JOIN accounts a ON a.id = adb.account_id WHERE account_domain_blocks.id = adb.id AND a.id IS NULL')
-      end
-
-      if ActiveRecord::Base.connection.table_exists? :conversation_mutes
-        ActiveRecord::Base.connection.execute('DELETE FROM conversation_mutes USING conversation_mutes cm LEFT JOIN accounts a ON a.id = cm.account_id WHERE conversation_mutes.id = cm.id AND a.id IS NULL')
-        ActiveRecord::Base.connection.execute('DELETE FROM conversation_mutes USING conversation_mutes cm LEFT JOIN conversations c ON c.id = cm.conversation_id WHERE conversation_mutes.id = cm.id AND c.id IS NULL')
-      end
-
-      ActiveRecord::Base.connection.execute('DELETE FROM favourites USING favourites f LEFT JOIN accounts a ON a.id = f.account_id WHERE favourites.id = f.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM favourites USING favourites f LEFT JOIN statuses s ON s.id = f.status_id WHERE favourites.id = f.id AND s.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM blocks USING blocks b LEFT JOIN accounts a ON a.id = b.account_id WHERE blocks.id = b.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM blocks USING blocks b LEFT JOIN accounts a ON a.id = b.target_account_id WHERE blocks.id = b.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM follow_requests USING follow_requests fr LEFT JOIN accounts a ON a.id = fr.account_id WHERE follow_requests.id = fr.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM follow_requests USING follow_requests fr LEFT JOIN accounts a ON a.id = fr.target_account_id WHERE follow_requests.id = fr.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM follows USING follows f LEFT JOIN accounts a ON a.id = f.account_id WHERE follows.id = f.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM follows USING follows f LEFT JOIN accounts a ON a.id = f.target_account_id WHERE follows.id = f.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM mutes USING mutes m LEFT JOIN accounts a ON a.id = m.account_id WHERE mutes.id = m.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM mutes USING mutes m LEFT JOIN accounts a ON a.id = m.target_account_id WHERE mutes.id = m.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM imports USING imports i LEFT JOIN accounts a ON a.id = i.account_id WHERE imports.id = i.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM mentions USING mentions m LEFT JOIN accounts a ON a.id = m.account_id WHERE mentions.id = m.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM mentions USING mentions m LEFT JOIN statuses s ON s.id = m.status_id WHERE mentions.id = m.id AND s.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM notifications USING notifications n LEFT JOIN accounts a ON a.id = n.account_id WHERE notifications.id = n.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM notifications USING notifications n LEFT JOIN accounts a ON a.id = n.from_account_id WHERE notifications.id = n.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM preview_cards USING preview_cards pc LEFT JOIN statuses s ON s.id = pc.status_id WHERE preview_cards.id = pc.id AND s.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM reports USING reports r LEFT JOIN accounts a ON a.id = r.account_id WHERE reports.id = r.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM reports USING reports r LEFT JOIN accounts a ON a.id = r.target_account_id WHERE reports.id = r.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM statuses_tags USING statuses_tags st LEFT JOIN statuses s ON s.id = st.status_id WHERE statuses_tags.tag_id = st.tag_id AND statuses_tags.status_id = st.status_id AND s.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM statuses_tags USING statuses_tags st LEFT JOIN tags t ON t.id = st.tag_id WHERE statuses_tags.tag_id = st.tag_id AND statuses_tags.status_id = st.status_id AND t.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM stream_entries USING stream_entries se LEFT JOIN accounts a ON a.id = se.account_id WHERE stream_entries.id = se.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM subscriptions USING subscriptions s LEFT JOIN accounts a ON a.id = s.account_id WHERE subscriptions.id = s.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM users USING users u LEFT JOIN accounts a ON a.id = u.account_id WHERE users.id = u.id AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM web_settings USING web_settings ws LEFT JOIN users u ON u.id = ws.user_id WHERE web_settings.id = ws.id AND u.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM oauth_access_grants USING oauth_access_grants oag LEFT JOIN users u ON u.id = oag.resource_owner_id WHERE oauth_access_grants.id = oag.id AND oag.resource_owner_id IS NOT NULL AND u.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM oauth_access_grants USING oauth_access_grants oag LEFT JOIN oauth_applications a ON a.id = oag.application_id WHERE oauth_access_grants.id = oag.id AND oag.application_id IS NOT NULL AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM oauth_access_tokens USING oauth_access_tokens oat LEFT JOIN users u ON u.id = oat.resource_owner_id WHERE oauth_access_tokens.id = oat.id AND oat.resource_owner_id IS NOT NULL AND u.id IS NULL')
-      ActiveRecord::Base.connection.execute('DELETE FROM oauth_access_tokens USING oauth_access_tokens oat LEFT JOIN oauth_applications a ON a.id = oat.application_id WHERE oauth_access_tokens.id = oat.id AND oat.application_id IS NOT NULL AND a.id IS NULL')
-
-      # All the nullifies:
-      ActiveRecord::Base.connection.execute('UPDATE statuses SET in_reply_to_id = NULL FROM statuses s LEFT JOIN statuses rs ON rs.id = s.in_reply_to_id WHERE statuses.id = s.id AND s.in_reply_to_id IS NOT NULL AND rs.id IS NULL')
-      ActiveRecord::Base.connection.execute('UPDATE statuses SET in_reply_to_account_id = NULL FROM statuses s LEFT JOIN accounts a ON a.id = s.in_reply_to_account_id WHERE statuses.id = s.id AND s.in_reply_to_account_id IS NOT NULL AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('UPDATE media_attachments SET status_id = NULL FROM media_attachments ma LEFT JOIN statuses s ON s.id = ma.status_id WHERE media_attachments.id = ma.id AND ma.status_id IS NOT NULL AND s.id IS NULL')
-      ActiveRecord::Base.connection.execute('UPDATE media_attachments SET account_id = NULL FROM media_attachments ma LEFT JOIN accounts a ON a.id = ma.account_id WHERE media_attachments.id = ma.id AND ma.account_id IS NOT NULL AND a.id IS NULL')
-      ActiveRecord::Base.connection.execute('UPDATE reports SET action_taken_by_account_id = NULL FROM reports r LEFT JOIN accounts a ON a.id = r.action_taken_by_account_id WHERE reports.id = r.id AND r.action_taken_by_account_id IS NOT NULL AND a.id IS NULL')
-    end
-
-    desc 'Remove deprecated preview cards'
-    task remove_deprecated_preview_cards: :environment do
-      next unless ActiveRecord::Base.connection.table_exists? 'deprecated_preview_cards'
-
-      class DeprecatedPreviewCard < ActiveRecord::Base
-        self.inheritance_column = false
-
-        path = '/preview_cards/:attachment/:id_partition/:style/:filename'
-        if ENV['S3_ENABLED'] != 'true'
-          path = (ENV['PAPERCLIP_ROOT_PATH'] || ':rails_root/public/system') + path
-        end
-
-        has_attached_file :image, styles: { original: '280x120>' }, convert_options: { all: '-quality 80 -strip' }, path: path
-      end
-
-      puts 'Delete records and associated files from deprecated preview cards? [y/N]: '
-      confirm = STDIN.gets.chomp
-
-      if confirm.casecmp('y').zero?
-        DeprecatedPreviewCard.in_batches.destroy_all
-
-        puts 'Drop deprecated preview cards table? [y/N]: '
-        confirm = STDIN.gets.chomp
-
-        if confirm.casecmp('y').zero?
-          ActiveRecord::Migration.drop_table :deprecated_preview_cards
-        end
-      end
-    end
-
-    desc 'Migrate photo preview cards made before 2.1'
-    task migrate_photo_preview_cards: :environment do
-      status_ids = Status.joins(:preview_cards)
-                         .where(preview_cards: { embed_url: '', type: :photo })
-                         .reorder(nil)
-                         .group(:id)
-                         .pluck(:id)
-
-      PreviewCard.where(embed_url: '', type: :photo).delete_all
-      LinkCrawlWorker.push_bulk status_ids
-    end
-
-    desc 'Find case-insensitive username duplicates of local users'
-    task find_duplicate_usernames: :environment do
-      include RoutingHelper
-
-      disable_log_stdout!
-
-      duplicate_masters = Account.find_by_sql('SELECT * FROM accounts WHERE id IN (SELECT min(id) FROM accounts WHERE domain IS NULL GROUP BY lower(username) HAVING count(*) > 1)')
-      pastel = Pastel.new
-
-      duplicate_masters.each do |account|
-        puts pastel.yellow('First of their name: ') + pastel.bold(account.username) + " (#{admin_account_url(account.id)})"
-
-        Account.where('lower(username) = ?', account.username.downcase).where.not(id: account.id).each do |duplicate|
-          puts '  ' + pastel.red('Duplicate: ') + admin_account_url(duplicate.id)
-        end
-      end
-    end
-
-    desc 'Remove all home feed regeneration markers'
-    task remove_regeneration_markers: :environment do
-      keys = Redis.current.keys('account:*:regeneration')
-
-      Redis.current.pipelined do
-        keys.each { |key| Redis.current.del(key) }
-      end
-    end
-
-    desc 'Check every known remote account and delete those that no longer exist in origin'
-    task purge_removed_accounts: :environment do
-      prepare_for_options!
-
-      options = {}
-
-      OptionParser.new do |opts|
-        opts.banner = 'Usage: rails mastodon:maintenance:purge_removed_accounts [options]'
-
-        opts.on('-f', '--force', 'Remove all encountered accounts without asking for confirmation') do
-          options[:force] = true
-        end
-
-        opts.on('-h', '--help', 'Display this message') do
-          puts opts
-          exit
-        end
-      end.parse!
-
-      disable_log_stdout!
-
-      total        = Account.remote.where(protocol: :activitypub).count
-      progress_bar = ProgressBar.create(total: total, format: '%c/%C |%w>%i| %e')
-
-      Account.remote.where(protocol: :activitypub).partitioned.find_each do |account|
-        progress_bar.increment
-
-        begin
-          code = Request.new(:head, account.uri).perform(&:code)
-        rescue StandardError
-          # This could happen due to network timeout, DNS timeout, wrong SSL cert, etc,
-          # which should probably not lead to perceiving the account as deleted, so
-          # just skip till next time
-          next
-        end
-
-        if [404, 410].include?(code)
-          if options[:force]
-            SuspendAccountService.new.call(account)
-            account.destroy
-          else
-            progress_bar.pause
-            progress_bar.clear
-            print "\nIt seems like #{account.acct} no longer exists. Purge the account from the database? [Y/n]: ".colorize(:yellow)
-            confirm = STDIN.gets.chomp
-            puts ''
-            progress_bar.resume
-
-            if confirm.casecmp('n').zero?
-              next
-            else
-              SuspendAccountService.new.call(account)
-              account.destroy
-            end
-          end
-        end
+    default_message.tap do |string|
+      if include_warning
+        string << "# Some variables in this file will be interpreted differently whether you are\n"
+        string << "# using docker-compose or not.\n\n"
       end
     end
   end
@@ -798,6 +600,48 @@ def disable_log_stdout!
   Paperclip.options[:log]      = false
 end
 
-def prepare_for_options!
-  2.times { ARGV.shift }
+def dotenv_escape(value)
+  # Dotenv has its own parser, which unfortunately deviates somewhat from
+  # what shells actually do.
+  #
+  # In particular, we can't use Shellwords::escape because it outputs a
+  # non-quotable string, while Dotenv requires `#` to always be in quoted
+  # strings.
+  #
+  # Therefore, we need to write our own escape code…
+  # Dotenv's parser has a *lot* of edge cases, and I think not every
+  # ASCII string can even be represented into something Dotenv can parse,
+  # so this is a best effort thing.
+  #
+  # In particular, strings with all the following probably cannot be
+  # escaped:
+  # - `#`, or ends with spaces, which requires some form of quoting (simply escaping won't work)
+  # - `'` (single quote), preventing us from single-quoting
+  # - `\` followed by either `r` or `n`
+
+  # No character that would cause Dotenv trouble
+  return value unless /[\s\#\\"'$]/.match?(value)
+
+  # As long as the value doesn't include single quotes, we can safely
+  # rely on single quotes
+  return "'#{value}'" unless value.include?("'")
+
+  # If the value contains the string '\n' or '\r' we simply can't use
+  # a double-quoted string, because Dotenv will expand \n or \r no
+  # matter how much escaping we add.
+  double_quoting_disallowed = /\\[rn]/.match?(value)
+
+  value = value.gsub(double_quoting_disallowed ? /[\\"'\s]/ : /[\\"']/) { |x| "\\#{x}" }
+
+  # Dotenv is especially tricky with `$` as unbalanced
+  # parenthesis will make it not unescape `\$` as `$`…
+
+  # Variables
+  value = value.gsub(/\$(?!\()/) { |x| "\\#{x}" }
+  # Commands
+  value = value.gsub(/\$(?<cmd>\((?:[^()]|\g<cmd>)+\))/) { |x| "\\#{x}" }
+
+  value = "\"#{value}\"" unless double_quoting_disallowed
+
+  value
 end

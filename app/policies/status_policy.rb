@@ -7,22 +7,20 @@ class StatusPolicy < ApplicationPolicy
     @preloaded_relations = preloaded_relations
   end
 
-  def index?
-    staff?
-  end
-
   def show?
-    if direct?
+    return false if author.unavailable?
+
+    if requires_mention?
       owned? || mention_exists?
     elsif private?
       owned? || following_author? || mention_exists?
     else
-      current_account.nil? || !author_blocking?
+      current_account.nil? || (!author_blocking? && !author_blocking_domain?)
     end
   end
 
   def reblog?
-    !direct? && (!private? || owned?) && show? && !blocking_author?
+    !requires_mention? && (!private? || owned?) && show? && !blocking_author?
   end
 
   def favourite?
@@ -30,19 +28,19 @@ class StatusPolicy < ApplicationPolicy
   end
 
   def destroy?
-    staff? || owned?
+    owned?
   end
 
   alias unreblog? destroy?
 
   def update?
-    staff?
+    owned?
   end
 
   private
 
-  def direct?
-    record.direct_visibility?
+  def requires_mention?
+    record.direct_visibility? || record.limited_visibility?
   end
 
   def owned?
@@ -59,8 +57,14 @@ class StatusPolicy < ApplicationPolicy
     if record.mentions.loaded?
       record.mentions.any? { |mention| mention.account_id == current_account.id }
     else
-      record.mentions.where(account: current_account).exists?
+      record.mentions.exists?(account: current_account)
     end
+  end
+
+  def author_blocking_domain?
+    return false if current_account.nil? || current_account.domain.nil?
+
+    author.domain_blocking?(current_account.domain)
   end
 
   def blocking_author?

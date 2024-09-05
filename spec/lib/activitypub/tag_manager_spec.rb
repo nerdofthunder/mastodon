@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require 'rails_helper'
 
 RSpec.describe ActivityPub::TagManager do
@@ -41,6 +43,37 @@ RSpec.describe ActivityPub::TagManager do
       status.mentions.create(account: mentioned)
       expect(subject.to(status)).to eq [subject.uri_for(mentioned)]
     end
+
+    it "returns URIs of mentioned group's followers for direct statuses to groups" do
+      status    = Fabricate(:status, visibility: :direct)
+      mentioned = Fabricate(:account, domain: 'remote.org', uri: 'https://remote.org/group', followers_url: 'https://remote.org/group/followers', actor_type: 'Group')
+      status.mentions.create(account: mentioned)
+      expect(subject.to(status)).to include(subject.uri_for(mentioned))
+      expect(subject.to(status)).to include(subject.followers_uri_for(mentioned))
+    end
+
+    context 'with followers and requested followers' do
+      let!(:bob) { Fabricate(:account, username: 'bob') }
+      let!(:alice) { Fabricate(:account, username: 'alice') }
+      let!(:foo) { Fabricate(:account) }
+      let!(:author) { Fabricate(:account, username: 'author', silenced: true) }
+      let!(:status) { Fabricate(:status, visibility: :direct, account: author) }
+
+      before do
+        bob.follow!(author)
+        FollowRequest.create!(account: foo, target_account: author)
+        status.mentions.create(account: alice)
+        status.mentions.create(account: bob)
+        status.mentions.create(account: foo)
+      end
+
+      it "returns URIs of mentions for direct silenced author's status only if they are followers or requesting to be" do
+        expect(subject.to(status))
+          .to include(subject.uri_for(bob))
+          .and include(subject.uri_for(foo))
+          .and not_include(subject.uri_for(alice))
+      end
+    end
   end
 
   describe '#cc' do
@@ -70,6 +103,37 @@ RSpec.describe ActivityPub::TagManager do
       status.mentions.create(account: mentioned)
       expect(subject.cc(status)).to include(subject.uri_for(mentioned))
     end
+
+    context 'with followers and requested followers' do
+      let!(:bob) { Fabricate(:account, username: 'bob') }
+      let!(:alice) { Fabricate(:account, username: 'alice') }
+      let!(:foo) { Fabricate(:account) }
+      let!(:author) { Fabricate(:account, username: 'author', silenced: true) }
+      let!(:status) { Fabricate(:status, visibility: :public, account: author) }
+
+      before do
+        bob.follow!(author)
+        FollowRequest.create!(account: foo, target_account: author)
+        status.mentions.create(account: alice)
+        status.mentions.create(account: bob)
+        status.mentions.create(account: foo)
+      end
+
+      it "returns URIs of mentions for silenced author's non-direct status only if they are followers or requesting to be" do
+        expect(subject.cc(status))
+          .to include(subject.uri_for(bob))
+          .and include(subject.uri_for(foo))
+          .and not_include(subject.uri_for(alice))
+      end
+    end
+
+    it 'returns poster of reblogged post, if reblog' do
+      bob    = Fabricate(:account, username: 'bob', domain: 'example.com', inbox_url: 'http://example.com/bob')
+      alice  = Fabricate(:account, username: 'alice')
+      status = Fabricate(:status, visibility: :public, account: bob)
+      reblog = Fabricate(:status, visibility: :public, account: alice, reblog: status)
+      expect(subject.cc(reblog)).to include(subject.uri_for(bob))
+    end
   end
 
   describe '#local_uri?' do
@@ -97,7 +161,7 @@ RSpec.describe ActivityPub::TagManager do
     end
 
     it 'returns the remote account by matching URI without fragment part' do
-      account = Fabricate(:account, uri: 'https://example.com/123')
+      account = Fabricate(:account, uri: 'https://example.com/123', domain: 'example.com')
       expect(subject.uri_to_resource('https://example.com/123#456', Account)).to eq account
     end
 
@@ -109,12 +173,6 @@ RSpec.describe ActivityPub::TagManager do
     it 'returns the local status for OStatus tag: URI' do
       status = Fabricate(:status)
       expect(subject.uri_to_resource(OStatus::TagManager.instance.uri_for(status), Status)).to eq status
-    end
-
-    it 'returns the local status for OStatus StreamEntry URL' do
-      status = Fabricate(:status)
-      stream_entry_url = account_stream_entry_url(status.account, status.stream_entry)
-      expect(subject.uri_to_resource(stream_entry_url, Status)).to eq status
     end
 
     it 'returns the remote status by matching URI without fragment part' do

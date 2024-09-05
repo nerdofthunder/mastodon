@@ -4,35 +4,24 @@ class Api::BaseController < ApplicationController
   DEFAULT_STATUSES_LIMIT = 20
   DEFAULT_ACCOUNTS_LIMIT = 40
 
-  include RateLimitHeaders
+  include Api::RateLimitHeaders
+  include Api::AccessTokenTrackingConcern
+  include Api::CachingConcern
+  include Api::ContentSecurityPolicy
+  include Api::ErrorHandling
+  include Api::Pagination
 
-  skip_before_action :store_current_location
-  skip_before_action :check_user_permissions
+  skip_before_action :require_functional!, unless: :limited_federation_mode?
+
+  before_action :require_authenticated_user!, if: :disallow_unauthenticated_api_access?
+  before_action :require_not_suspended!
+
+  vary_by 'Authorization'
 
   protect_from_forgery with: :null_session
 
-  rescue_from ActiveRecord::RecordInvalid, Mastodon::ValidationError do |e|
-    render json: { error: e.to_s }, status: 422
-  end
-
-  rescue_from ActiveRecord::RecordNotFound do
-    render json: { error: 'Record not found' }, status: 404
-  end
-
-  rescue_from HTTP::Error, Mastodon::UnexpectedResponseError do
-    render json: { error: 'Remote data could not be fetched' }, status: 503
-  end
-
-  rescue_from OpenSSL::SSL::SSLError do
-    render json: { error: 'Remote SSL certificate could not be verified' }, status: 503
-  end
-
-  rescue_from Mastodon::NotPermittedError do
-    render json: { error: 'This action is not allowed' }, status: 403
-  end
-
   def doorkeeper_unauthorized_render_options(error: nil)
-    { json: { error: (error.try(:description) || 'Not authorized') } }
+    { json: { error: error.try(:description) || 'Not authorized' } }
   end
 
   def doorkeeper_forbidden_render_options(*)
@@ -41,20 +30,14 @@ class Api::BaseController < ApplicationController
 
   protected
 
-  def set_pagination_headers(next_path = nil, prev_path = nil)
-    links = []
-    links << [next_path, [%w(rel next)]] if next_path
-    links << [prev_path, [%w(rel prev)]] if prev_path
-    response.headers['Link'] = LinkHeader.new(links) unless links.empty?
-  end
-
-  def limit_param(default_limit)
+  def limit_param(default_limit, max_limit = nil)
     return default_limit unless params[:limit]
-    [params[:limit].to_i.abs, default_limit * 2].min
+
+    [params[:limit].to_i.abs, max_limit || (default_limit * 2)].min
   end
 
-  def truthy_param?(key)
-    ActiveModel::Type::Boolean.new.cast(params[key])
+  def params_slice(*keys)
+    params.slice(*keys).permit(*keys)
   end
 
   def current_resource_owner
@@ -67,13 +50,25 @@ class Api::BaseController < ApplicationController
     nil
   end
 
+  def require_authenticated_user!
+    render json: { error: 'This method requires an authenticated user' }, status: 401 unless current_user
+  end
+
+  def require_not_suspended!
+    render json: { error: 'Your login is currently disabled' }, status: 403 if current_user&.account&.unavailable?
+  end
+
   def require_user!
-    if current_user && !current_user.disabled?
-      set_user_activity
-    elsif current_user
+    if !current_user
+      render json: { error: 'This method requires an authenticated user' }, status: 422
+    elsif !current_user.confirmed?
+      render json: { error: 'Your login is missing a confirmed e-mail address' }, status: 403
+    elsif !current_user.approved?
+      render json: { error: 'Your login is currently pending approval' }, status: 403
+    elsif !current_user.functional?
       render json: { error: 'Your login is currently disabled' }, status: 403
     else
-      render json: { error: 'This method requires an authenticated user' }, status: 422
+      update_user_sign_in
     end
   end
 
@@ -83,5 +78,15 @@ class Api::BaseController < ApplicationController
 
   def authorize_if_got_token!(*scopes)
     doorkeeper_authorize!(*scopes) if doorkeeper_token
+  end
+
+  def disallow_unauthenticated_api_access?
+    ENV['DISALLOW_UNAUTHENTICATED_API_ACCESS'] == 'true' || Rails.configuration.x.limited_federation_mode
+  end
+
+  private
+
+  def respond_with_error(code)
+    render json: { error: Rack::Utils::HTTP_STATUS_CODES[code] }, status: code
   end
 end

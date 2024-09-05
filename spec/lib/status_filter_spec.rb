@@ -2,40 +2,42 @@
 
 require 'rails_helper'
 
-describe StatusFilter do
+RSpec.describe StatusFilter do
   describe '#filtered?' do
     let(:status) { Fabricate(:status) }
 
     context 'without an account' do
-      subject { described_class.new(status, nil) }
+      subject(:filter) { described_class.new(status, nil) }
 
       context 'when there are no connections' do
-        it { is_expected.not_to be_filtered }
+        it { is_expected.to_not be_filtered }
       end
 
       context 'when status account is silenced' do
         before do
-          status.account.update(silenced: true)
+          status.account.silence!
         end
 
         it { is_expected.to be_filtered }
       end
 
       context 'when status policy does not allow show' do
-        before do
-          expect_any_instance_of(StatusPolicy).to receive(:show?).and_return(false)
-        end
+        it 'filters the status' do
+          policy = instance_double(StatusPolicy, show?: false)
+          allow(StatusPolicy).to receive(:new).and_return(policy)
 
-        it { is_expected.to be_filtered }
+          expect(filter).to be_filtered
+        end
       end
     end
 
     context 'with real account' do
+      subject(:filter) { described_class.new(status, account) }
+
       let(:account) { Fabricate(:account) }
-      subject { described_class.new(status, account) }
 
       context 'when there are no connections' do
-        it { is_expected.not_to be_filtered }
+        it { is_expected.to_not be_filtered }
       end
 
       context 'when status account is blocked' do
@@ -65,18 +67,19 @@ describe StatusFilter do
 
       context 'when status account is silenced' do
         before do
-          status.account.update(silenced: true)
+          status.account.silence!
         end
 
         it { is_expected.to be_filtered }
       end
 
       context 'when status policy does not allow show' do
-        before do
-          expect_any_instance_of(StatusPolicy).to receive(:show?).and_return(false)
-        end
+        it 'filters the status' do
+          policy = instance_double(StatusPolicy, show?: false)
+          allow(StatusPolicy).to receive(:new).and_return(policy)
 
-        it { is_expected.to be_filtered }
+          expect(filter).to be_filtered
+        end
       end
     end
   end

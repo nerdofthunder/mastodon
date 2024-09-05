@@ -1,54 +1,32 @@
 # frozen_string_literal: true
 
-class ActivityPub::DistributionWorker
-  include Sidekiq::Worker
-
-  sidekiq_options queue: 'push'
-
+class ActivityPub::DistributionWorker < ActivityPub::RawDistributionWorker
+  # Distribute a new status or an edit of a status to all the places
+  # where the status is supposed to go or where it was interacted with
   def perform(status_id)
     @status  = Status.find(status_id)
     @account = @status.account
 
-    return if skip_distribution?
-
-    ActivityPub::DeliveryWorker.push_bulk(inboxes) do |inbox_url|
-      [signed_payload, @account.id, inbox_url]
-    end
-
-    relay! if relayable?
+    distribute!
   rescue ActiveRecord::RecordNotFound
     true
   end
 
-  private
-
-  def skip_distribution?
-    @status.direct_visibility?
-  end
-
-  def relayable?
-    @status.public_visibility?
-  end
+  protected
 
   def inboxes
-    @inboxes ||= @account.followers.inboxes
-  end
-
-  def signed_payload
-    @signed_payload ||= Oj.dump(ActivityPub::LinkedDataSignature.new(payload).sign!(@account))
+    @inboxes ||= StatusReachFinder.new(@status).inboxes
   end
 
   def payload
-    @payload ||= ActiveModelSerializers::SerializableResource.new(
-      @status,
-      serializer: ActivityPub::ActivitySerializer,
-      adapter: ActivityPub::Adapter
-    ).as_json
+    @payload ||= Oj.dump(serialize_payload(activity, ActivityPub::ActivitySerializer, signer: @account))
   end
 
-  def relay!
-    ActivityPub::DeliveryWorker.push_bulk(Relay.enabled.pluck(:inbox_url)) do |inbox_url|
-      [signed_payload, @account.id, inbox_url]
-    end
+  def activity
+    ActivityPub::ActivityPresenter.from_status(@status)
+  end
+
+  def options
+    { 'synchronize_followers' => @status.private_visibility? }
   end
 end

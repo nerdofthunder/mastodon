@@ -1,62 +1,61 @@
 # frozen_string_literal: true
 
 class TagsController < ApplicationController
-  PAGE_SIZE = 20
+  include SignatureVerification
+  include WebAppControllerConcern
 
-  before_action :set_body_classes
-  before_action :set_instance_presenter
+  PAGE_SIZE     = 20
+  PAGE_SIZE_MAX = 200
+
+  vary_by -> { public_fetch_mode? ? 'Accept, Accept-Language, Cookie' : 'Accept, Accept-Language, Cookie, Signature' }
+
+  before_action :require_account_signature!, if: -> { request.format == :json && authorized_fetch_mode? }
+  before_action :authenticate_user!, if: :limited_federation_mode?
+  before_action :set_local
+  before_action :set_tag
+  before_action :set_statuses, if: -> { request.format == :rss }
+
+  skip_before_action :require_functional!, unless: :limited_federation_mode?
 
   def show
-    @tag = Tag.find_by!(name: params[:id].downcase)
-
     respond_to do |format|
       format.html do
-        serializable_resource = ActiveModelSerializers::SerializableResource.new(InitialStatePresenter.new(initial_state_params), serializer: InitialStateSerializer)
-        @initial_state_json   = serializable_resource.to_json
+        expires_in(15.seconds, public: true, stale_while_revalidate: 30.seconds, stale_if_error: 1.hour) unless user_signed_in?
       end
 
       format.rss do
-        @statuses = Status.as_tag_timeline(@tag).limit(PAGE_SIZE)
-        @statuses = cache_collection(@statuses, Status)
-
-        render xml: RSS::TagSerializer.render(@tag, @statuses)
+        expires_in 0, public: true
       end
 
       format.json do
-        @statuses = Status.as_tag_timeline(@tag, current_account, params[:local]).paginate_by_max_id(PAGE_SIZE, params[:max_id])
-        @statuses = cache_collection(@statuses, Status)
-
-        render json: collection_presenter,
-               serializer: ActivityPub::CollectionSerializer,
-               adapter: ActivityPub::Adapter,
-               content_type: 'application/activity+json'
+        expires_in 3.minutes, public: public_fetch_mode?
+        render json: collection_presenter, serializer: ActivityPub::CollectionSerializer, adapter: ActivityPub::Adapter, content_type: 'application/activity+json'
       end
     end
   end
 
   private
 
-  def set_body_classes
-    @body_classes = 'with-modals'
+  def set_tag
+    @tag = Tag.usable.find_normalized!(params[:id])
   end
 
-  def set_instance_presenter
-    @instance_presenter = InstancePresenter.new
+  def set_local
+    @local = truthy_param?(:local)
+  end
+
+  def set_statuses
+    @statuses = preload_collection(TagFeed.new(@tag, nil, local: @local).get(limit_param), Status)
+  end
+
+  def limit_param
+    params[:limit].present? ? [params[:limit].to_i, PAGE_SIZE_MAX].min : PAGE_SIZE
   end
 
   def collection_presenter
     ActivityPub::CollectionPresenter.new(
       id: tag_url(@tag),
-      type: :ordered,
-      size: @tag.statuses.count,
-      items: @statuses.map { |s| ActivityPub::TagManager.instance.uri_for(s) }
+      type: :ordered
     )
-  end
-
-  def initial_state_params
-    {
-      settings: {},
-      token: current_session&.token,
-    }
   end
 end

@@ -2,10 +2,14 @@
 
 class InstancePolicy < ApplicationPolicy
   def index?
-    admin?
+    role.can?(:manage_federation)
   end
 
-  def resubscribe?
-    admin?
+  def show?
+    role.can?(:manage_federation)
+  end
+
+  def destroy?
+    role.can?(:manage_federation)
   end
 end

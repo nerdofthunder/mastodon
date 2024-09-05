@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
+# See also: USERNAME_RE in the Account class
+
 class UniqueUsernameValidator < ActiveModel::Validator
   def validate(account)
-    return if account.username.nil?
+    return if account.username.blank?
 
-    normalized_username = account.username.downcase.delete('.')
-
-    scope = Account.where(domain: nil).where('lower(username) = ?', normalized_username)
+    scope = Account.with_username(account.username).with_domain(account.domain)
     scope = scope.where.not(id: account.id) if account.persisted?
 
     account.errors.add(:username, :taken) if scope.exists?

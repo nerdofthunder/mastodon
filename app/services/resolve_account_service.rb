@@ -1,209 +1,139 @@
 # frozen_string_literal: true
 
 class ResolveAccountService < BaseService
-  include OStatus2::MagicKey
-  include JsonLdHelper
+  include DomainControlHelper
+  include WebfingerHelper
+  include Redisable
+  include Lockable
 
-  DFRN_NS = 'http://purl.org/macgirvin/dfrn/1.0'
-
-  # Find or create a local account for a remote user.
-  # When creating, look up the user's webfinger and fetch all
-  # important information from their feed
-  # @param [String] uri User URI in the form of username@domain
+  # Find or create an account record for a remote user. When creating,
+  # look up the user's webfinger and fetch ActivityPub data
+  # @param [String, Account] uri URI in the username@domain format or account record
+  # @param [Hash] options
+  # @option options [Boolean] :redirected Do not follow further Webfinger redirects
+  # @option options [Boolean] :skip_webfinger Do not attempt any webfinger query or refreshing account data
+  # @option options [Boolean] :skip_cache Get the latest data from origin even if cache is not due to update yet
+  # @option options [Boolean] :suppress_errors When failing, return nil instead of raising an error
   # @return [Account]
-  def call(uri, update_profile = true, redirected = nil)
-    @username, @domain = uri.split('@')
-    @update_profile    = update_profile
+  def call(uri, options = {})
+    return if uri.blank?
 
-    return Account.find_local(@username) if TagManager.instance.local_domain?(@domain)
+    process_options!(uri, options)
 
-    @account = Account.find_remote(@username, @domain)
+    # First of all we want to check if we've got the account
+    # record with the URI already, and if so, we can exit early
 
-    return @account unless webfinger_update_due?
+    return if domain_not_allowed?(@domain)
 
-    Rails.logger.debug "Looking up webfinger for #{uri}"
+    @account ||= Account.find_remote(@username, @domain)
 
-    @webfinger = Goldfinger.finger("acct:#{uri}")
+    return @account if @account&.local? || @domain.nil? || !webfinger_update_due?
 
-    confirmed_username, confirmed_domain = @webfinger.subject.gsub(/\Aacct:/, '').split('@')
+    # At this point we are in need of a Webfinger query, which may
+    # yield us a different username/domain through a redirect
+    process_webfinger!(@uri)
+    @domain = nil if TagManager.instance.local_domain?(@domain)
 
-    if confirmed_username.casecmp(@username).zero? && confirmed_domain.casecmp(@domain).zero?
-      @username = confirmed_username
-      @domain   = confirmed_domain
-    elsif redirected.nil?
-      return call("#{confirmed_username}@#{confirmed_domain}", update_profile, true)
-    else
-      Rails.logger.debug 'Requested and returned acct URIs do not match'
+    # Because the username/domain pair may be different than what
+    # we already checked, we need to check if we've already got
+    # the record with that URI, again
+
+    return if domain_not_allowed?(@domain)
+
+    @account ||= Account.find_remote(@username, @domain)
+
+    if gone_from_origin? && not_yet_deleted?
+      queue_deletion!
       return
     end
 
-    return if links_missing?
-    return Account.find_local(@username) if TagManager.instance.local_domain?(@domain)
+    return @account if @account&.local? || gone_from_origin? || !webfinger_update_due?
 
-    RedisLock.acquire(lock_options) do |lock|
-      if lock.acquired?
-        @account = Account.find_remote(@username, @domain)
+    # Now it is certain, it is definitely a remote account, and it
+    # either needs to be created, or updated from fresh data
 
-        if activitypub_ready? || @account&.activitypub?
-          handle_activitypub
-        else
-          handle_ostatus
-        end
-      else
-        raise Mastodon::RaceConditionError
-      end
-    end
-
-    @account
-  rescue Goldfinger::Error => e
-    Rails.logger.debug "Webfinger query for #{uri} unsuccessful: #{e}"
-    nil
+    fetch_account!
+  rescue Webfinger::Error => e
+    Rails.logger.debug { "Webfinger query for #{@uri} failed: #{e}" }
+    raise unless @options[:suppress_errors]
   end
 
   private
 
-  def links_missing?
-    !(activitypub_ready? || ostatus_ready?)
+  def process_options!(uri, options)
+    @options = { suppress_errors: true }.merge(options)
+
+    if uri.is_a?(Account)
+      @account  = uri
+      @username = @account.username
+      @domain   = @account.domain
+    else
+      @username, @domain = uri.strip.gsub(/\A@/, '').split('@')
+    end
+
+    @domain = if TagManager.instance.local_domain?(@domain)
+                nil
+              else
+                TagManager.instance.normalize_domain(@domain)
+              end
+
+    @uri = [@username, @domain].compact.join('@')
   end
 
-  def ostatus_ready?
-    !(@webfinger.link('http://schemas.google.com/g/2010#updates-from').nil? ||
-      @webfinger.link('salmon').nil? ||
-      @webfinger.link('http://webfinger.net/rel/profile-page').nil? ||
-      @webfinger.link('magic-public-key').nil? ||
-      canonical_uri.nil? ||
-      hub_url.nil?)
+  def process_webfinger!(uri)
+    @webfinger                           = webfinger!("acct:#{uri}")
+    confirmed_username, confirmed_domain = split_acct(@webfinger.subject)
+
+    if confirmed_username.casecmp(@username).zero? && confirmed_domain.casecmp(@domain).zero?
+      @username = confirmed_username
+      @domain   = confirmed_domain
+      return
+    end
+
+    # Account doesn't match, so it may have been redirected
+    @webfinger         = webfinger!("acct:#{confirmed_username}@#{confirmed_domain}")
+    @username, @domain = split_acct(@webfinger.subject)
+
+    raise Webfinger::RedirectError, "Too many webfinger redirects for URI #{uri} (stopped at #{@username}@#{@domain})" unless confirmed_username.casecmp(@username).zero? && confirmed_domain.casecmp(@domain).zero?
+  rescue Webfinger::GoneError
+    @gone = true
+  end
+
+  def split_acct(acct)
+    acct.delete_prefix('acct:').split('@').tap do |parts|
+      raise Webfinger::Error, 'Webfinger response is missing user or host value' unless parts.size == 2
+    end
+  end
+
+  def fetch_account!
+    with_redis_lock("resolve:#{@username}@#{@domain}") do
+      @account = ActivityPub::FetchRemoteAccountService.new.call(actor_url, suppress_errors: @options[:suppress_errors])
+    end
+
+    @account
   end
 
   def webfinger_update_due?
-    @account.nil? || @account.possibly_stale?
-  end
+    return false if @options[:check_delivery_availability] && !DeliveryFailureTracker.available?(@domain)
+    return false if @options[:skip_webfinger]
 
-  def activitypub_ready?
-    !@webfinger.link('self').nil? &&
-      ['application/activity+json', 'application/ld+json; profile="https://www.w3.org/ns/activitystreams"'].include?(@webfinger.link('self').type) &&
-      !actor_json.nil? &&
-      actor_json['inbox'].present?
-  end
-
-  def handle_ostatus
-    create_account if @account.nil?
-    update_account
-    update_account_profile if update_profile?
-  end
-
-  def update_profile?
-    @update_profile
-  end
-
-  def handle_activitypub
-    return if actor_json.nil?
-
-    @account = ActivityPub::ProcessAccountService.new.call(@username, @domain, actor_json)
-  rescue Oj::ParseError
-    nil
-  end
-
-  def create_account
-    Rails.logger.debug "Creating new remote account for #{@username}@#{@domain}"
-
-    @account = Account.new(username: @username, domain: @domain)
-    @account.suspended   = true if auto_suspend?
-    @account.silenced    = true if auto_silence?
-    @account.private_key = nil
-  end
-
-  def update_account
-    @account.last_webfingered_at = Time.now.utc
-    @account.protocol            = :ostatus
-    @account.remote_url          = atom_url
-    @account.salmon_url          = salmon_url
-    @account.url                 = url
-    @account.public_key          = public_key
-    @account.uri                 = canonical_uri
-    @account.hub_url             = hub_url
-    @account.save!
-  end
-
-  def auto_suspend?
-    domain_block&.suspend?
-  end
-
-  def auto_silence?
-    domain_block&.silence?
-  end
-
-  def domain_block
-    return @domain_block if defined?(@domain_block)
-    @domain_block = DomainBlock.find_by(domain: @domain)
-  end
-
-  def atom_url
-    @atom_url ||= @webfinger.link('http://schemas.google.com/g/2010#updates-from').href
-  end
-
-  def salmon_url
-    @salmon_url ||= @webfinger.link('salmon').href
+    @options[:skip_cache] || @account.nil? || @account.possibly_stale?
   end
 
   def actor_url
-    @actor_url ||= @webfinger.link('self').href
+    @actor_url ||= @webfinger.self_link_href
   end
 
-  def url
-    @url ||= @webfinger.link('http://webfinger.net/rel/profile-page').href
+  def gone_from_origin?
+    @gone
   end
 
-  def public_key
-    @public_key ||= magic_key_to_pem(@webfinger.link('magic-public-key').href)
+  def not_yet_deleted?
+    @account.present? && !@account.local?
   end
 
-  def canonical_uri
-    return @canonical_uri if defined?(@canonical_uri)
-
-    author_uri = atom.at_xpath('/xmlns:feed/xmlns:author/xmlns:uri')
-
-    if author_uri.nil?
-      owner      = atom.at_xpath('/xmlns:feed').at_xpath('./dfrn:owner', dfrn: DFRN_NS)
-      author_uri = owner.at_xpath('./xmlns:uri') unless owner.nil?
-    end
-
-    @canonical_uri = author_uri.nil? ? nil : author_uri.content
-  end
-
-  def hub_url
-    return @hub_url if defined?(@hub_url)
-
-    hubs     = atom.xpath('//xmlns:link[@rel="hub"]')
-    @hub_url = hubs.empty? || hubs.first['href'].nil? ? nil : hubs.first['href']
-  end
-
-  def atom_body
-    return @atom_body if defined?(@atom_body)
-
-    @atom_body = Request.new(:get, atom_url).perform do |response|
-      raise Mastodon::UnexpectedResponseError, response unless response.code == 200
-      response.body_with_limit
-    end
-  end
-
-  def actor_json
-    return @actor_json if defined?(@actor_json)
-
-    json        = fetch_resource(actor_url, false)
-    @actor_json = supported_context?(json) && equals_or_includes_any?(json['type'], ActivityPub::FetchRemoteAccountService::SUPPORTED_TYPES) ? json : nil
-  end
-
-  def atom
-    return @atom if defined?(@atom)
-    @atom = Nokogiri::XML(atom_body)
-  end
-
-  def update_account_profile
-    RemoteProfileUpdateWorker.perform_async(@account.id, atom_body.force_encoding('UTF-8'), false)
-  end
-
-  def lock_options
-    { redis: Redis.current, key: "resolve:#{@username}@#{@domain}" }
+  def queue_deletion!
+    @account.suspend!(origin: :remote)
+    AccountDeletionWorker.perform_async(@account.id, { 'reserve_username' => false, 'skip_activitypub' => true })
   end
 end

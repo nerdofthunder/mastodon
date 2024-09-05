@@ -1,15 +1,11 @@
 # frozen_string_literal: true
 
-class Api::V1::Statuses::RebloggedByAccountsController < Api::BaseController
-  include Authorization
-
+class Api::V1::Statuses::RebloggedByAccountsController < Api::V1::Statuses::BaseController
   before_action -> { authorize_if_got_token! :read, :'read:accounts' }
-  before_action :set_status
   after_action :insert_pagination_headers
 
-  respond_to :json
-
   def index
+    cache_if_unauthenticated!
     @accounts = load_accounts
     render json: @accounts, each_serializer: REST::AccountSerializer
   end
@@ -17,35 +13,29 @@ class Api::V1::Statuses::RebloggedByAccountsController < Api::BaseController
   private
 
   def load_accounts
-    default_accounts.merge(paginated_statuses).to_a
+    scope = default_accounts
+    scope = scope.not_excluded_by_account(current_account) unless current_account.nil?
+    scope.merge(paginated_statuses).to_a
   end
 
   def default_accounts
-    Account.includes(:statuses).references(:statuses)
+    Account.without_suspended.includes(:statuses, :account_stat, :user).references(:statuses)
   end
 
   def paginated_statuses
-    Status.where(reblog_of_id: @status.id).paginate_by_max_id(
+    Status.where(reblog_of_id: @status.id).distributable_visibility.paginate_by_max_id(
       limit_param(DEFAULT_ACCOUNTS_LIMIT),
       params[:max_id],
       params[:since_id]
     )
   end
 
-  def insert_pagination_headers
-    set_pagination_headers(next_path, prev_path)
-  end
-
   def next_path
-    if records_continue?
-      api_v1_status_reblogged_by_index_url pagination_params(max_id: pagination_max_id)
-    end
+    api_v1_status_reblogged_by_index_url pagination_params(max_id: pagination_max_id) if records_continue?
   end
 
   def prev_path
-    unless @accounts.empty?
-      api_v1_status_reblogged_by_index_url pagination_params(since_id: pagination_since_id)
-    end
+    api_v1_status_reblogged_by_index_url pagination_params(since_id: pagination_since_id) unless @accounts.empty?
   end
 
   def pagination_max_id
@@ -58,17 +48,5 @@ class Api::V1::Statuses::RebloggedByAccountsController < Api::BaseController
 
   def records_continue?
     @accounts.size == limit_param(DEFAULT_ACCOUNTS_LIMIT)
-  end
-
-  def set_status
-    @status = Status.find(params[:status_id])
-    authorize @status, :show?
-  rescue Mastodon::NotPermittedError
-    # Reraise in order to get a 404 instead of a 403 error code
-    raise ActiveRecord::RecordNotFound
-  end
-
-  def pagination_params(core_params)
-    params.slice(:limit).permit(:limit).merge(core_params)
   end
 end

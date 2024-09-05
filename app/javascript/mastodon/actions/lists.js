@@ -1,6 +1,7 @@
 import api from '../api';
-import { importFetchedAccounts } from './importer';
+
 import { showAlertForError } from './alerts';
+import { importFetchedAccounts } from './importer';
 
 export const LIST_FETCH_REQUEST = 'LIST_FETCH_REQUEST';
 export const LIST_FETCH_SUCCESS = 'LIST_FETCH_SUCCESS';
@@ -42,6 +43,13 @@ export const LIST_EDITOR_REMOVE_REQUEST = 'LIST_EDITOR_REMOVE_REQUEST';
 export const LIST_EDITOR_REMOVE_SUCCESS = 'LIST_EDITOR_REMOVE_SUCCESS';
 export const LIST_EDITOR_REMOVE_FAIL    = 'LIST_EDITOR_REMOVE_FAIL';
 
+export const LIST_ADDER_RESET = 'LIST_ADDER_RESET';
+export const LIST_ADDER_SETUP = 'LIST_ADDER_SETUP';
+
+export const LIST_ADDER_LISTS_FETCH_REQUEST = 'LIST_ADDER_LISTS_FETCH_REQUEST';
+export const LIST_ADDER_LISTS_FETCH_SUCCESS = 'LIST_ADDER_LISTS_FETCH_SUCCESS';
+export const LIST_ADDER_LISTS_FETCH_FAIL    = 'LIST_ADDER_LISTS_FETCH_FAIL';
+
 export const fetchList = id => (dispatch, getState) => {
   if (getState().getIn(['lists', id])) {
     return;
@@ -49,7 +57,7 @@ export const fetchList = id => (dispatch, getState) => {
 
   dispatch(fetchListRequest(id));
 
-  api(getState).get(`/api/v1/lists/${id}`)
+  api().get(`/api/v1/lists/${id}`)
     .then(({ data }) => dispatch(fetchListSuccess(data)))
     .catch(err => dispatch(fetchListFail(id, err)));
 };
@@ -70,10 +78,10 @@ export const fetchListFail = (id, error) => ({
   error,
 });
 
-export const fetchLists = () => (dispatch, getState) => {
+export const fetchLists = () => (dispatch) => {
   dispatch(fetchListsRequest());
 
-  api(getState).get('/api/v1/lists')
+  api().get('/api/v1/lists')
     .then(({ data }) => dispatch(fetchListsSuccess(data)))
     .catch(err => dispatch(fetchListsFail(err)));
 };
@@ -117,10 +125,10 @@ export const changeListEditorTitle = value => ({
   value,
 });
 
-export const createList = (title, shouldReset) => (dispatch, getState) => {
+export const createList = (title, shouldReset) => (dispatch) => {
   dispatch(createListRequest());
 
-  api(getState).post('/api/v1/lists', { title }).then(({ data }) => {
+  api().post('/api/v1/lists', { title }).then(({ data }) => {
     dispatch(createListSuccess(data));
 
     if (shouldReset) {
@@ -143,10 +151,10 @@ export const createListFail = error => ({
   error,
 });
 
-export const updateList = (id, title, shouldReset) => (dispatch, getState) => {
+export const updateList = (id, title, shouldReset, isExclusive, replies_policy) => (dispatch) => {
   dispatch(updateListRequest(id));
 
-  api(getState).put(`/api/v1/lists/${id}`, { title }).then(({ data }) => {
+  api().put(`/api/v1/lists/${id}`, { title, replies_policy, exclusive: typeof isExclusive === 'undefined' ? undefined : !!isExclusive }).then(({ data }) => {
     dispatch(updateListSuccess(data));
 
     if (shouldReset) {
@@ -175,10 +183,10 @@ export const resetListEditor = () => ({
   type: LIST_EDITOR_RESET,
 });
 
-export const deleteList = id => (dispatch, getState) => {
+export const deleteList = id => (dispatch) => {
   dispatch(deleteListRequest(id));
 
-  api(getState).delete(`/api/v1/lists/${id}`)
+  api().delete(`/api/v1/lists/${id}`)
     .then(() => dispatch(deleteListSuccess(id)))
     .catch(err => dispatch(deleteListFail(id, err)));
 };
@@ -199,10 +207,10 @@ export const deleteListFail = (id, error) => ({
   error,
 });
 
-export const fetchListAccounts = listId => (dispatch, getState) => {
+export const fetchListAccounts = listId => (dispatch) => {
   dispatch(fetchListAccountsRequest(listId));
 
-  api(getState).get(`/api/v1/lists/${listId}/accounts`, { params: { limit: 0 } }).then(({ data }) => {
+  api().get(`/api/v1/lists/${listId}/accounts`, { params: { limit: 0 } }).then(({ data }) => {
     dispatch(importFetchedAccounts(data));
     dispatch(fetchListAccountsSuccess(listId, data));
   }).catch(err => dispatch(fetchListAccountsFail(listId, err)));
@@ -226,7 +234,7 @@ export const fetchListAccountsFail = (id, error) => ({
   error,
 });
 
-export const fetchListSuggestions = q => (dispatch, getState) => {
+export const fetchListSuggestions = q => (dispatch) => {
   const params = {
     q,
     resolve: false,
@@ -234,7 +242,7 @@ export const fetchListSuggestions = q => (dispatch, getState) => {
     following: true,
   };
 
-  api(getState).get('/api/v1/accounts/search', { params }).then(({ data }) => {
+  api().get('/api/v1/accounts/search', { params }).then(({ data }) => {
     dispatch(importFetchedAccounts(data));
     dispatch(fetchListSuggestionsReady(q, data));
   }).catch(error => dispatch(showAlertForError(error)));
@@ -259,10 +267,10 @@ export const addToListEditor = accountId => (dispatch, getState) => {
   dispatch(addToList(getState().getIn(['listEditor', 'listId']), accountId));
 };
 
-export const addToList = (listId, accountId) => (dispatch, getState) => {
+export const addToList = (listId, accountId) => (dispatch) => {
   dispatch(addToListRequest(listId, accountId));
 
-  api(getState).post(`/api/v1/lists/${listId}/accounts`, { account_ids: [accountId] })
+  api().post(`/api/v1/lists/${listId}/accounts`, { account_ids: [accountId] })
     .then(() => dispatch(addToListSuccess(listId, accountId)))
     .catch(err => dispatch(addToListFail(listId, accountId, err)));
 };
@@ -290,10 +298,10 @@ export const removeFromListEditor = accountId => (dispatch, getState) => {
   dispatch(removeFromList(getState().getIn(['listEditor', 'listId']), accountId));
 };
 
-export const removeFromList = (listId, accountId) => (dispatch, getState) => {
+export const removeFromList = (listId, accountId) => (dispatch) => {
   dispatch(removeFromListRequest(listId, accountId));
 
-  api(getState).delete(`/api/v1/lists/${listId}/accounts`, { params: { account_ids: [accountId] } })
+  api().delete(`/api/v1/lists/${listId}/accounts`, { params: { account_ids: [accountId] } })
     .then(() => dispatch(removeFromListSuccess(listId, accountId)))
     .catch(err => dispatch(removeFromListFail(listId, accountId, err)));
 };
@@ -316,3 +324,49 @@ export const removeFromListFail = (listId, accountId, error) => ({
   accountId,
   error,
 });
+
+export const resetListAdder = () => ({
+  type: LIST_ADDER_RESET,
+});
+
+export const setupListAdder = accountId => (dispatch, getState) => {
+  dispatch({
+    type: LIST_ADDER_SETUP,
+    account: getState().getIn(['accounts', accountId]),
+  });
+  dispatch(fetchLists());
+  dispatch(fetchAccountLists(accountId));
+};
+
+export const fetchAccountLists = accountId => (dispatch) => {
+  dispatch(fetchAccountListsRequest(accountId));
+
+  api().get(`/api/v1/accounts/${accountId}/lists`)
+    .then(({ data }) => dispatch(fetchAccountListsSuccess(accountId, data)))
+    .catch(err => dispatch(fetchAccountListsFail(accountId, err)));
+};
+
+export const fetchAccountListsRequest = id => ({
+  type:LIST_ADDER_LISTS_FETCH_REQUEST,
+  id,
+});
+
+export const fetchAccountListsSuccess = (id, lists) => ({
+  type: LIST_ADDER_LISTS_FETCH_SUCCESS,
+  id,
+  lists,
+});
+
+export const fetchAccountListsFail = (id, err) => ({
+  type: LIST_ADDER_LISTS_FETCH_FAIL,
+  id,
+  err,
+});
+
+export const addToListAdder = listId => (dispatch, getState) => {
+  dispatch(addToList(listId, getState().getIn(['listAdder', 'accountId'])));
+};
+
+export const removeFromListAdder = listId => (dispatch, getState) => {
+  dispatch(removeFromList(listId, getState().getIn(['listAdder', 'accountId'])));
+};

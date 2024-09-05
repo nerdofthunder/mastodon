@@ -1,10 +1,8 @@
+# frozen_string_literal: true
+
 require 'rails_helper'
 
-RSpec.describe Notification, type: :model do
-  describe '#from_account' do
-    pending
-  end
-
+RSpec.describe Notification do
   describe '#target_status' do
     let(:notification) { Fabricate(:notification, activity: activity) }
     let(:status)       { Fabricate(:status) }
@@ -12,7 +10,7 @@ RSpec.describe Notification, type: :model do
     let(:favourite)    { Fabricate(:favourite, status: status) }
     let(:mention)      { Fabricate(:mention, status: status) }
 
-    context 'activity is reblog' do
+    context 'when Activity is reblog' do
       let(:activity) { reblog }
 
       it 'returns status' do
@@ -20,7 +18,7 @@ RSpec.describe Notification, type: :model do
       end
     end
 
-    context 'activity is favourite' do
+    context 'when Activity is favourite' do
       let(:type)     { :favourite }
       let(:activity) { favourite }
 
@@ -29,7 +27,7 @@ RSpec.describe Notification, type: :model do
       end
     end
 
-    context 'activity is mention' do
+    context 'when Activity is mention' do
       let(:activity) { mention }
 
       it 'returns status' do
@@ -38,95 +36,303 @@ RSpec.describe Notification, type: :model do
     end
   end
 
-  describe '#browserable?' do
-    let(:notification) { Fabricate(:notification) }
-
-    subject { notification.browserable? }
-
-    context 'type is :follow_request' do
-      before do
-        allow(notification).to receive(:type).and_return(:follow_request)
-      end
-
-      it 'returns false' do
-        is_expected.to be false
-      end
-    end
-
-    context 'type is not :follow_request' do
-      before do
-        allow(notification).to receive(:type).and_return(:else)
-      end
-
-      it 'returns true' do
-        is_expected.to be true
-      end
-    end
-  end
-
   describe '#type' do
     it 'returns :reblog for a Status' do
-      notification = Notification.new(activity: Status.new)
+      notification = described_class.new(activity: Status.new)
       expect(notification.type).to eq :reblog
     end
 
     it 'returns :mention for a Mention' do
-      notification = Notification.new(activity: Mention.new)
+      notification = described_class.new(activity: Mention.new)
       expect(notification.type).to eq :mention
     end
 
     it 'returns :favourite for a Favourite' do
-      notification = Notification.new(activity: Favourite.new)
+      notification = described_class.new(activity: Favourite.new)
       expect(notification.type).to eq :favourite
     end
 
     it 'returns :follow for a Follow' do
-      notification = Notification.new(activity: Follow.new)
+      notification = described_class.new(activity: Follow.new)
       expect(notification.type).to eq :follow
     end
   end
 
-  describe '.reload_stale_associations!' do
-    context 'account_ids are empty' do
-      let(:cached_items) { [] }
+  describe 'Setting account from activity_type' do
+    context 'when activity_type is a Status' do
+      it 'sets the notification from_account correctly' do
+        status = Fabricate(:status)
 
-      subject { described_class.reload_stale_associations!(cached_items) }
+        notification = Fabricate.build(:notification, activity_type: 'Status', activity: status)
 
-      it 'returns nil' do
-        is_expected.to be nil
+        expect(notification.from_account).to eq(status.account)
       end
     end
 
-    context 'account_ids are present' do
+    context 'when activity_type is a Follow' do
+      it 'sets the notification from_account correctly' do
+        follow = Fabricate(:follow)
+
+        notification = Fabricate.build(:notification, activity_type: 'Follow', activity: follow)
+
+        expect(notification.from_account).to eq(follow.account)
+      end
+    end
+
+    context 'when activity_type is a Favourite' do
+      it 'sets the notification from_account correctly' do
+        favourite = Fabricate(:favourite)
+
+        notification = Fabricate.build(:notification, activity_type: 'Favourite', activity: favourite)
+
+        expect(notification.from_account).to eq(favourite.account)
+      end
+    end
+
+    context 'when activity_type is a FollowRequest' do
+      it 'sets the notification from_account correctly' do
+        follow_request = Fabricate(:follow_request)
+
+        notification = Fabricate.build(:notification, activity_type: 'FollowRequest', activity: follow_request)
+
+        expect(notification.from_account).to eq(follow_request.account)
+      end
+    end
+
+    context 'when activity_type is a Poll' do
+      it 'sets the notification from_account correctly' do
+        poll = Fabricate(:poll)
+
+        notification = Fabricate.build(:notification, activity_type: 'Poll', activity: poll)
+
+        expect(notification.from_account).to eq(poll.account)
+      end
+    end
+
+    context 'when activity_type is a Report' do
+      it 'sets the notification from_account correctly' do
+        report = Fabricate(:report)
+
+        notification = Fabricate.build(:notification, activity_type: 'Report', activity: report)
+
+        expect(notification.from_account).to eq(report.account)
+      end
+    end
+
+    context 'when activity_type is a Mention' do
+      it 'sets the notification from_account correctly' do
+        mention = Fabricate(:mention)
+
+        notification = Fabricate.build(:notification, activity_type: 'Mention', activity: mention)
+
+        expect(notification.from_account).to eq(mention.status.account)
+      end
+    end
+
+    context 'when activity_type is an Account' do
+      it 'sets the notification from_account correctly' do
+        account = Fabricate(:account)
+
+        notification = Fabricate.build(:notification, activity_type: 'Account', account: account)
+
+        expect(notification.account).to eq(account)
+      end
+    end
+
+    context 'when activity_type is an AccountWarning' do
+      it 'sets the notification from_account to the recipient of the notification' do
+        account = Fabricate(:account)
+        account_warning = Fabricate(:account_warning, target_account: account)
+
+        notification = Fabricate.build(:notification, activity_type: 'AccountWarning', activity: account_warning, account: account)
+
+        expect(notification.from_account).to eq(account)
+      end
+    end
+  end
+
+  describe '.paginate_groups_by_max_id' do
+    let(:account) { Fabricate(:account) }
+
+    let!(:notifications) do
+      ['group-1', 'group-1', nil, 'group-2', nil, 'group-1', 'group-2', 'group-1']
+        .map { |group_key| Fabricate(:notification, account: account, group_key: group_key) }
+    end
+
+    context 'without since_id or max_id' do
+      it 'returns the most recent notifications, only keeping one notification per group' do
+        expect(described_class.without_suspended.paginate_groups_by_max_id(4).pluck(:id))
+          .to eq [notifications[7], notifications[6], notifications[4], notifications[2]].pluck(:id)
+      end
+    end
+
+    context 'with since_id' do
+      it 'returns the most recent notifications, only keeping one notification per group' do
+        expect(described_class.without_suspended.paginate_groups_by_max_id(4, since_id: notifications[4].id).pluck(:id))
+          .to eq [notifications[7], notifications[6]].pluck(:id)
+      end
+    end
+
+    context 'with max_id' do
+      it 'returns the most recent notifications after max_id, only keeping one notification per group' do
+        expect(described_class.without_suspended.paginate_groups_by_max_id(4, max_id: notifications[7].id).pluck(:id))
+          .to eq [notifications[6], notifications[5], notifications[4], notifications[2]].pluck(:id)
+      end
+    end
+  end
+
+  describe '.paginate_groups_by_min_id' do
+    let(:account) { Fabricate(:account) }
+
+    let!(:notifications) do
+      ['group-1', 'group-1', nil, 'group-2', nil, 'group-1', 'group-2', 'group-1']
+        .map { |group_key| Fabricate(:notification, account: account, group_key: group_key) }
+    end
+
+    context 'without min_id or max_id' do
+      it 'returns the oldest notifications, only keeping one notification per group' do
+        expect(described_class.without_suspended.paginate_groups_by_min_id(4).pluck(:id))
+          .to eq [notifications[0], notifications[2], notifications[3], notifications[4]].pluck(:id)
+      end
+    end
+
+    context 'with max_id' do
+      it 'returns the oldest notifications, stopping at max_id, only keeping one notification per group' do
+        expect(described_class.without_suspended.paginate_groups_by_min_id(4, max_id: notifications[4].id).pluck(:id))
+          .to eq [notifications[0], notifications[2], notifications[3]].pluck(:id)
+      end
+    end
+
+    context 'with min_id' do
+      it 'returns the most oldest notifications after min_id, only keeping one notification per group' do
+        expect(described_class.without_suspended.paginate_groups_by_min_id(4, min_id: notifications[0].id).pluck(:id))
+          .to eq [notifications[1], notifications[2], notifications[3], notifications[4]].pluck(:id)
+      end
+    end
+  end
+
+  describe '.preload_cache_collection_target_statuses' do
+    subject do
+      described_class.preload_cache_collection_target_statuses(notifications) do |target_statuses|
+        # preload account for testing instead of using cache_collection
+        Status.preload(:account).where(id: target_statuses.map(&:id))
+      end
+    end
+
+    context 'when notifications are empty' do
+      let(:notifications) { [] }
+
+      it 'returns []' do
+        expect(subject).to eq []
+      end
+    end
+
+    context 'when notifications are present' do
       before do
-        allow(accounts_with_ids).to receive(:[]).with(stale_account1.id).and_return(account1)
-        allow(accounts_with_ids).to receive(:[]).with(stale_account2.id).and_return(account2)
-        allow(Account).to receive_message_chain(:where, :map, :to_h).and_return(accounts_with_ids)
+        notifications.each(&:reload)
       end
 
-      let(:cached_items) do
+      let(:mention) { Fabricate(:mention) }
+      let(:status) { Fabricate(:status) }
+      let(:reblog) { Fabricate(:status, reblog: Fabricate(:status)) }
+      let(:follow) { Fabricate(:follow) }
+      let(:follow_request) { Fabricate(:follow_request) }
+      let(:favourite) { Fabricate(:favourite) }
+      let(:poll) { Fabricate(:poll) }
+
+      let(:notifications) do
         [
-          Fabricate(:notification, activity: Fabricate(:status)),
-          Fabricate(:notification, activity: Fabricate(:follow)),
+          Fabricate(:notification, type: :mention, activity: mention),
+          Fabricate(:notification, type: :status, activity: status),
+          Fabricate(:notification, type: :reblog, activity: reblog),
+          Fabricate(:notification, type: :follow, activity: follow),
+          Fabricate(:notification, type: :follow_request, activity: follow_request),
+          Fabricate(:notification, type: :favourite, activity: favourite),
+          Fabricate(:notification, type: :poll, activity: poll),
         ]
       end
 
-      let(:stale_account1) { cached_items[0].from_account }
-      let(:stale_account2) { cached_items[1].from_account }
+      context 'with a preloaded target status' do
+        it 'preloads mention' do
+          expect(subject[0].type).to eq :mention
+          expect(subject[0].association(:mention)).to be_loaded
+          expect(subject[0].mention.association(:status)).to be_loaded
+        end
 
-      let(:account1) { Fabricate(:account) }
-      let(:account2) { Fabricate(:account) }
+        it 'preloads status' do
+          expect(subject[1].type).to eq :status
+          expect(subject[1].association(:status)).to be_loaded
+        end
 
-      let(:accounts_with_ids) { { account1.id => account1, account2.id => account2 } }
+        it 'preloads reblog' do
+          expect(subject[2].type).to eq :reblog
+          expect(subject[2].association(:status)).to be_loaded
+          expect(subject[2].status.association(:reblog)).to be_loaded
+        end
 
-      it 'reloads associations' do
-        expect(cached_items[0].from_account).to be stale_account1
-        expect(cached_items[1].from_account).to be stale_account2
+        it 'preloads follow as nil' do
+          expect(subject[3].type).to eq :follow
+          expect(subject[3].target_status).to be_nil
+        end
 
-        described_class.reload_stale_associations!(cached_items)
+        it 'preloads follow_request as nill' do
+          expect(subject[4].type).to eq :follow_request
+          expect(subject[4].target_status).to be_nil
+        end
 
-        expect(cached_items[0].from_account).to be account1
-        expect(cached_items[1].from_account).to be account2
+        it 'preloads favourite' do
+          expect(subject[5].type).to eq :favourite
+          expect(subject[5].association(:favourite)).to be_loaded
+          expect(subject[5].favourite.association(:status)).to be_loaded
+        end
+
+        it 'preloads poll' do
+          expect(subject[6].type).to eq :poll
+          expect(subject[6].association(:poll)).to be_loaded
+          expect(subject[6].poll.association(:status)).to be_loaded
+        end
+      end
+
+      context 'with a cached status' do
+        it 'replaces mention' do
+          expect(subject[0].type).to eq :mention
+          expect(subject[0].target_status.association(:account)).to be_loaded
+          expect(subject[0].target_status).to eq mention.status
+        end
+
+        it 'replaces status' do
+          expect(subject[1].type).to eq :status
+          expect(subject[1].target_status.association(:account)).to be_loaded
+          expect(subject[1].target_status).to eq status
+        end
+
+        it 'replaces reblog' do
+          expect(subject[2].type).to eq :reblog
+          expect(subject[2].target_status.association(:account)).to be_loaded
+          expect(subject[2].target_status).to eq reblog.reblog
+        end
+
+        it 'replaces follow' do
+          expect(subject[3].type).to eq :follow
+          expect(subject[3].target_status).to be_nil
+        end
+
+        it 'replaces follow_request' do
+          expect(subject[4].type).to eq :follow_request
+          expect(subject[4].target_status).to be_nil
+        end
+
+        it 'replaces favourite' do
+          expect(subject[5].type).to eq :favourite
+          expect(subject[5].target_status.association(:account)).to be_loaded
+          expect(subject[5].target_status).to eq favourite.status
+        end
+
+        it 'replaces poll' do
+          expect(subject[6].type).to eq :poll
+          expect(subject[6].target_status.association(:account)).to be_loaded
+          expect(subject[6].target_status).to eq poll.status
+        end
       end
     end
   end

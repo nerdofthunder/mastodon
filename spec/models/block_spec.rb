@@ -1,23 +1,11 @@
+# frozen_string_literal: true
+
 require 'rails_helper'
 
-RSpec.describe Block, type: :model do
+RSpec.describe Block do
   describe 'validations' do
-    it 'has a valid fabricator' do
-      block = Fabricate.build(:block)
-      expect(block).to be_valid
-    end
-
-    it 'is invalid without an account' do
-      block = Fabricate.build(:block, account: nil)
-      block.valid?
-      expect(block).to model_have_error_on_field(:account)
-    end
-
-    it 'is invalid without a target_account' do
-      block = Fabricate.build(:block, target_account: nil)
-      block.valid?
-      expect(block).to model_have_error_on_field(:target_account)
-    end
+    it { is_expected.to belong_to(:account).required }
+    it { is_expected.to belong_to(:target_account).required }
   end
 
   it 'removes blocking cache after creation' do
@@ -26,22 +14,22 @@ RSpec.describe Block, type: :model do
     Rails.cache.write("exclude_account_ids_for:#{account.id}", [])
     Rails.cache.write("exclude_account_ids_for:#{target_account.id}", [])
 
-    Block.create!(account: account, target_account: target_account)
+    described_class.create!(account: account, target_account: target_account)
 
-    expect(Rails.cache.exist?("exclude_account_ids_for:#{account.id}")).to eq false
-    expect(Rails.cache.exist?("exclude_account_ids_for:#{target_account.id}")).to eq false
+    expect(Rails.cache.exist?("exclude_account_ids_for:#{account.id}")).to be false
+    expect(Rails.cache.exist?("exclude_account_ids_for:#{target_account.id}")).to be false
   end
 
   it 'removes blocking cache after destruction' do
     account = Fabricate(:account)
     target_account = Fabricate(:account)
-    block = Block.create!(account: account, target_account: target_account)
+    block = described_class.create!(account: account, target_account: target_account)
     Rails.cache.write("exclude_account_ids_for:#{account.id}", [target_account.id])
     Rails.cache.write("exclude_account_ids_for:#{target_account.id}", [account.id])
 
     block.destroy!
 
-    expect(Rails.cache.exist?("exclude_account_ids_for:#{account.id}")).to eq false
-    expect(Rails.cache.exist?("exclude_account_ids_for:#{target_account.id}")).to eq false
+    expect(Rails.cache.exist?("exclude_account_ids_for:#{account.id}")).to be false
+    expect(Rails.cache.exist?("exclude_account_ids_for:#{target_account.id}")).to be false
   end
 end

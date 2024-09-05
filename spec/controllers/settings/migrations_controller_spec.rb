@@ -1,16 +1,17 @@
+# frozen_string_literal: true
+
 require 'rails_helper'
 
-describe Settings::MigrationsController do
+RSpec.describe Settings::MigrationsController do
   render_views
 
   shared_examples 'authenticate user' do
     it 'redirects to sign_in page' do
-      is_expected.to redirect_to new_user_session_path
+      expect(subject).to redirect_to new_user_session_path
     end
   end
 
   describe 'GET #show' do
-
     context 'when user is not sign in' do
       subject { get :show }
 
@@ -20,58 +21,88 @@ describe Settings::MigrationsController do
     context 'when user is sign in' do
       subject { get :show }
 
-      let(:user) { Fabricate(:user, account: account) }
-      let(:account) { Fabricate(:account, moved_to_account: moved_to_account) }
+      let(:user) { Fabricate(:account, moved_to_account: moved_to_account).user }
+
       before { sign_in user, scope: :user }
 
       context 'when user does not have moved to account' do
         let(:moved_to_account) { nil }
 
         it 'renders show page' do
-          is_expected.to have_http_status 200
-          is_expected.to render_template :show
+          expect(subject).to have_http_status 200
+          expect(subject).to render_template :show
         end
       end
 
-      context 'when user does not have moved to account' do
+      context 'when user has a moved to account' do
         let(:moved_to_account) { Fabricate(:account) }
 
         it 'renders show page' do
-          is_expected.to have_http_status 200
-          is_expected.to render_template :show
+          expect(subject).to have_http_status 200
+          expect(subject).to render_template :show
         end
       end
     end
   end
 
-  describe 'PUT #update' do
-
+  describe 'POST #create' do
     context 'when user is not sign in' do
-      subject { put :update }
+      subject { post :create }
 
       it_behaves_like 'authenticate user'
     end
 
-    context 'when user is sign in' do
-      subject { put :update, params: { migration: { acct: acct } } }
+    context 'when user is signed in' do
+      subject { post :create, params: { account_migration: { acct: acct, current_password: '12345678' } } }
 
-      let(:user) { Fabricate(:user) }
+      let(:user) { Fabricate(:user, password: '12345678') }
+
       before { sign_in user, scope: :user }
 
       context 'when migration account is changed' do
-        let(:acct) { Fabricate(:account) }
+        let(:acct) { Fabricate(:account, also_known_as: [ActivityPub::TagManager.instance.uri_for(user.account)]) }
 
         it 'updates moved to account' do
-          is_expected.to redirect_to settings_migration_path
+          expect(subject).to redirect_to settings_migration_path
           expect(user.account.reload.moved_to_account_id).to eq acct.id
         end
       end
 
-      context 'when acct is a current account' do
+      context 'when acct is the current account' do
         let(:acct) { user.account }
 
-        it 'renders show' do
-          is_expected.to render_template :show
+        it 'does not update the moved account', :aggregate_failures do
+          subject
+
+          expect(user.account.reload.moved_to_account_id).to be_nil
+          expect(response).to render_template :show
+        end
+      end
+
+      context 'when target account does not reference the account being moved from' do
+        let(:acct) { Fabricate(:account, also_known_as: []) }
+
+        it 'does not update the moved account', :aggregate_failures do
+          subject
+
+          expect(user.account.reload.moved_to_account_id).to be_nil
+          expect(response).to render_template :show
+        end
+      end
+
+      context 'when a recent migration already exists' do
+        let(:acct) { Fabricate(:account, also_known_as: [ActivityPub::TagManager.instance.uri_for(user.account)]) }
+
+        before do
+          moved_to = Fabricate(:account, also_known_as: [ActivityPub::TagManager.instance.uri_for(user.account)])
+          user.account.migrations.create!(acct: moved_to.acct)
+        end
+
+        it 'does not update the moved account', :aggregate_failures do
+          subject
+
+          expect(user.account.reload.moved_to_account_id).to be_nil
+          expect(response).to render_template :show
         end
       end
     end

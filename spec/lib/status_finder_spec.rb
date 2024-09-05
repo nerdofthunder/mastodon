@@ -2,7 +2,7 @@
 
 require 'rails_helper'
 
-describe StatusFinder do
+RSpec.describe StatusFinder do
   include RoutingHelper
 
   describe '#status' do
@@ -18,19 +18,13 @@ describe StatusFinder do
 
       it 'raises an error if action is not :show' do
         recognized = Rails.application.routes.recognize_path(url)
-        expect(recognized).to receive(:[]).with(:action).and_return(:create)
-        expect(Rails.application.routes).to receive(:recognize_path).with(url).and_return(recognized)
+        allow(recognized).to receive(:[]).with(:action).and_return(:create)
+        allow(Rails.application.routes).to receive(:recognize_path).with(url).and_return(recognized)
 
         expect { subject.status }.to raise_error(ActiveRecord::RecordNotFound)
-      end
-    end
 
-    context 'with a stream entry url' do
-      let(:stream_entry) { Fabricate(:stream_entry) }
-      let(:url) { account_stream_entry_url(stream_entry.account, stream_entry) }
-
-      it 'finds the stream entry' do
-        expect(subject.status).to eq(stream_entry.status)
+        expect(Rails.application.routes).to have_received(:recognize_path)
+        expect(recognized).to have_received(:[])
       end
     end
 

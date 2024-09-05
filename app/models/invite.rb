@@ -1,4 +1,5 @@
 # frozen_string_literal: true
+
 # == Schema Information
 #
 # Table name: invites
@@ -12,20 +13,25 @@
 #  created_at :datetime         not null
 #  updated_at :datetime         not null
 #  autofollow :boolean          default(FALSE), not null
+#  comment    :text
 #
 
 class Invite < ApplicationRecord
   include Expireable
 
-  belongs_to :user
-  has_many :users, inverse_of: :invite
+  COMMENT_SIZE_LIMIT = 420
 
-  scope :available, -> { where(expires_at: nil).or(where('expires_at >= ?', Time.now.utc)) }
+  belongs_to :user, inverse_of: :invites
+  has_many :users, inverse_of: :invite, dependent: nil
+
+  scope :available, -> { where(expires_at: nil).or(where(expires_at: Time.now.utc..)) }
+
+  validates :comment, length: { maximum: COMMENT_SIZE_LIMIT }
 
   before_validation :set_code
 
   def valid_for_use?
-    (max_uses.nil? || uses < max_uses) && !expired?
+    (max_uses.nil? || uses < max_uses) && !expired? && user&.functional?
   end
 
   private

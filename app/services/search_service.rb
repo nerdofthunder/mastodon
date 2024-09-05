@@ -1,20 +1,25 @@
 # frozen_string_literal: true
 
 class SearchService < BaseService
-  attr_accessor :query, :account, :limit, :resolve
+  QUOTE_EQUIVALENT_CHARACTERS = /[“”„«»「」『』《》]/
 
-  def call(query, limit, resolve = false, account = nil)
-    @query   = query.strip
-    @account = account
-    @limit   = limit
-    @resolve = resolve
+  def call(query, account, limit, options = {})
+    @query     = query&.strip&.gsub(QUOTE_EQUIVALENT_CHARACTERS, '"')
+    @account   = account
+    @options   = options
+    @limit     = limit.to_i
+    @offset    = options[:type].blank? ? 0 : options[:offset].to_i
+    @resolve   = options[:resolve] || false
+    @following = options[:following] || false
 
     default_results.tap do |results|
+      next if @query.blank? || @limit.zero?
+
       if url_query?
-        results.merge!(url_resource_results) unless url_resource.nil?
-      elsif query.present?
+        results.merge!(url_resource_results) unless url_resource.nil? || @offset.positive? || (@options[:type].present? && url_resource_symbol != @options[:type].to_sym)
+      elsif @query.present?
         results[:accounts] = perform_accounts_search! if account_searchable?
-        results[:statuses] = perform_statuses_search! if full_text_searchable?
+        results[:statuses] = perform_statuses_search! if status_searchable?
         results[:hashtags] = perform_hashtags_search! if hashtag_searchable?
       end
     end
@@ -23,21 +28,37 @@ class SearchService < BaseService
   private
 
   def perform_accounts_search!
-    AccountSearchService.new.call(query, limit, account, resolve: resolve)
+    AccountSearchService.new.call(
+      @query,
+      @account,
+      limit: @limit,
+      resolve: @resolve,
+      offset: @offset,
+      use_searchable_text: true,
+      following: @following,
+      start_with_hashtag: @query.start_with?('#')
+    )
   end
 
   def perform_statuses_search!
-    statuses = StatusesIndex.filter(term: { searchable_by: account.id })
-                            .query(multi_match: { type: 'most_fields', query: query, operator: 'and', fields: %w(text text.stemmed) })
-                            .limit(limit)
-                            .objects
-                            .compact
-
-    statuses.reject { |status| StatusFilter.new(status, account).filtered? }
+    StatusesSearchService.new.call(
+      @query,
+      @account,
+      limit: @limit,
+      offset: @offset,
+      account_id: @options[:account_id],
+      min_id: @options[:min_id],
+      max_id: @options[:max_id]
+    )
   end
 
   def perform_hashtags_search!
-    Tag.search_for(query.gsub(/\A#/, ''), limit)
+    TagSearchService.new.call(
+      @query,
+      limit: @limit,
+      offset: @offset,
+      exclude_unreviewed: @options[:exclude_unreviewed]
+    )
   end
 
   def default_results
@@ -45,7 +66,7 @@ class SearchService < BaseService
   end
 
   def url_query?
-    query =~ /\Ahttps?:\/\//
+    @resolve && %r{\Ahttps?://}.match?(@query)
   end
 
   def url_resource_results
@@ -53,23 +74,34 @@ class SearchService < BaseService
   end
 
   def url_resource
-    @_url_resource ||= ResolveURLService.new.call(query, on_behalf_of: @account)
+    @url_resource ||= ResolveURLService.new.call(@query, on_behalf_of: @account)
   end
 
   def url_resource_symbol
     url_resource.class.name.downcase.pluralize.to_sym
   end
 
-  def full_text_searchable?
-    return false unless Chewy.enabled?
-    !account.nil? && !((query.start_with?('#') || query.include?('@')) && !query.include?(' '))
+  def status_searchable?
+    Chewy.enabled? && status_search? && @account.present?
   end
 
   def account_searchable?
-    !(query.include?('@') && query.include?(' '))
+    account_search?
   end
 
   def hashtag_searchable?
-    !query.include?('@')
+    hashtag_search?
+  end
+
+  def account_search?
+    @options[:type].blank? || @options[:type] == 'accounts'
+  end
+
+  def hashtag_search?
+    @options[:type].blank? || @options[:type] == 'hashtags'
+  end
+
+  def status_search?
+    @options[:type].blank? || @options[:type] == 'statuses'
   end
 end
